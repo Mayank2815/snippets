@@ -17,6 +17,7 @@ state and deploy story. The only things shared are this repo and the conventions
 The VM tools are bound to loopback on the VM. Reach them through an SSH tunnel:
 
 ```bash
+./deploy/deploy.sh user@host              # sync every VM tool and restart the stack
 ssh -N -L 4300:127.0.0.1:4300 user@host   # then open http://localhost:4300
 ```
 
@@ -41,6 +42,7 @@ Port numbers, the tunnel pattern and the shared Docker conventions are in
 snippets/
   README.md                  this file
   CONTRIBUTING.md            the tool contract and how changes land
+  deploy/                    the VM stack: docker-compose.yml for every VM tool, deploy.sh
   knowledge/                 repo-wide conventions (ports, naming, Docker patterns)
     README.md
     conventions.md

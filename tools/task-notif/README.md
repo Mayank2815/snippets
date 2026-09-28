@@ -180,13 +180,18 @@ Two settings are not optional:
   threads marked Done are wiped on every deploy.
 
 Set every `sync: false` variable in the Render dashboard. On Render the dashboard is
-reachable at the service URL, and **it has no authentication** — see below.
+reachable at the service URL, so `DASHBOARD_PASSWORD` is required there — see below.
 
-### The dashboard has no authentication
+### Dashboard access
 
-It is bound to `127.0.0.1` in `docker-compose.yml` deliberately — anyone who could reach it
-could read your tasks and trigger sends. Reach it through an SSH tunnel rather than
-publishing the port. If you ever do expose it, put a reverse proxy with auth in front.
+The dashboard shows task contents and can trigger sends, so it must not be open to the
+internet. Two layers, use both where they apply:
+
+- `docker-compose.yml` binds the port to `127.0.0.1` deliberately. Reach it through an SSH
+  tunnel rather than publishing the port. The team workbench (`tools/workbench`) fronts it
+  the same way, on the VM's loopback.
+- `DASHBOARD_PASSWORD` turns on HTTP Basic auth for everything except `/healthz`. It is
+  optional behind loopback and required wherever the URL is public, such as Render.
 
 ### macOS launchd gotcha
 
@@ -308,8 +313,11 @@ like "dev done", "PR raised", "ready for QA") and `blocker` (from "blocked", "wa
 "need access"). They can misfire on a comment that merely *describes* a blockage, such as
 a root-cause analysis. Adjust `DONE_MARKERS` and `BLOCKER_MARKERS` in `src/digest.ts`.
 
-**What it deliberately does not do** is write a narrative. There is no LLM in this
-pipeline, so the digest reports facts and leaves the sentence-making to you.
+**What it deliberately does not do** is invent facts. Every section of the digest is built
+from Teamwork and Slack data by rules, not by a model. The one optional exception is the
+stand-up summary: with `GEMINI_API_KEY` set, Gemini turns those facts into a few sentences
+you can read out (`src/llm/standup.ts`); without the key nothing is generated and the digest
+is facts only.
 
 ## Slack mentions
 
@@ -386,7 +394,7 @@ These two are indistinguishable without reading intent:
 | `hi @Leo @Priya please check this BUG` | Leo replies | No — one person checking is enough |
 | `Hi @Kiran @Priya can you please raise the PR` | Kiran replies | Yes — both were asked |
 
-Same shape, opposite answers. There is no LLM in this pipeline to judge which is which, so
+Same shape, opposite answers. No rule and no model here judges which is which, so
 guessing would silently drop things that genuinely needed a reply. The row is surfaced with
 the fact attached, and the Mute button is the reliable way to silence one.
 

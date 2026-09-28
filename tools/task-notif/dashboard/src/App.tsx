@@ -17,7 +17,9 @@ function duration(minutes: number): string {
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api${path}`, {
+  // Relative on purpose: behind the workbench proxy this page is served under /task-notif/,
+  // and an absolute /api would ask the proxy for a route it does not have.
+  const res = await fetch(`api${path}`, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
   });
