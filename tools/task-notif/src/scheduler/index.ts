@@ -22,6 +22,15 @@ const RUN_TIMEOUT_MS = 12 * 60_000;
  * satisfied costs one comparison.
  */
 export const CATCHUP_POLL_MS = 15 * 60_000;
+/**
+ * The scheduled timer is re-armed every minute instead of sleeping until the slot.
+ * Node timers count time the machine was awake: when the host sleeps (a laptop lid, or
+ * the Docker VM on it), a long timer inherits the whole nap as lateness. On 28 September
+ * the Mac slept 38 minutes in the evening and the 21:00 digest timer fired at 21:37 —
+ * after the catch-up poll had already sent it at 21:06. With one-minute re-arms a nap
+ * delays a slot by at most the nap that overlaps it, and the catch-up poll covers that.
+ */
+export const TIMER_TICK_MS = 60_000;
 
 export const JOB_KINDS: JobKind[] = ['reminder', 'digest', 'weekly'];
 
@@ -68,8 +77,25 @@ export function shouldCatchUp(config: Config, job: Job, now: DateTime, lastSucce
   return DateTime.fromISO(lastSuccessfulRunAt).setZone(config.timezone) < slot;
 }
 
+/** How long to wait before the next look: the slot if it is close, otherwise one tick. */
+export function timerDelayMs(next: DateTime, now: DateTime = DateTime.now()): number {
+  return Math.max(0, Math.min(next.diff(now).toMillis(), TIMER_TICK_MS, MAX_TIMEOUT_MS));
+}
+
+/**
+ * True when a successful run already satisfied this slot, whoever triggered it. The
+ * catch-up poll may have sent a slot before a late timer gets to it; firing again would
+ * deliver the same message twice.
+ */
+export function slotAlreadyDelivered(slot: DateTime, lastSuccessfulRunAt: string | null): boolean {
+  if (!lastSuccessfulRunAt) return false;
+  return DateTime.fromISO(lastSuccessfulRunAt) >= slot;
+}
+
 export class Scheduler {
   private readonly timers = new Map<JobKind, NodeJS.Timeout>();
+  /** The slot each job last logged as "next run", so re-arms stay quiet. */
+  private readonly announced = new Map<JobKind, string>();
   private readonly retryTimers = new Map<JobKind, NodeJS.Timeout>();
   private catchUpTimer: NodeJS.Timeout | null = null;
   private readonly running = new Set<JobKind>();
@@ -155,14 +181,26 @@ export class Scheduler {
       return;
     }
 
-    const delay = Math.max(0, Math.min(next.diffNow().toMillis(), MAX_TIMEOUT_MS));
-    this.log(`${kind}: next run ${next.toFormat('ccc d LLL HH:mm ZZZZ')} (in ${(delay / 60000).toFixed(1)} min)`);
+    const delay = timerDelayMs(next);
+    // Logged once per slot, not on every one-minute re-arm.
+    if (this.announced.get(kind) !== next.toISO()) {
+      this.announced.set(kind, next.toISO() ?? '');
+      this.log(`${kind}: next run ${next.toFormat('ccc d LLL HH:mm ZZZZ')} (in ${next.diffNow().as('minutes').toFixed(1)} min)`);
+    }
 
     this.timers.set(
       kind,
       setTimeout(() => {
         // A clamped timer has not reached the target yet; re-arm rather than fire early.
         if (DateTime.now() < next.minus({ seconds: 30 })) {
+          this.schedule(kind);
+          return;
+        }
+        // A timer that fires late (the machine slept) may find the catch-up poll already
+        // sent this slot. Then there is nothing to do but move on to the next one.
+        const last = getRuns().find((r) => r.job === kind && r.ok)?.at ?? null;
+        if (slotAlreadyDelivered(next, last)) {
+          this.log(`${kind}: ${next.toFormat('HH:mm')} slot was already delivered at ${DateTime.fromISO(last!).setZone(config.timezone).toFormat('HH:mm')} — skipping the late timer`);
           this.schedule(kind);
           return;
         }

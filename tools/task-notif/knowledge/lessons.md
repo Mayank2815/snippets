@@ -209,3 +209,14 @@ commit that fixed it. Paths are relative to `tools/task-notif/`.
 
 - **2026-09-02** A run failing during the scan threw before any bookkeeping, so a lost run
   left no trace in the dashboard. Scan failures are now written to the run history.
+
+- **2026-09-28. The evening digest went out twice (21:08 and 21:39) after the Mac slept.**
+  The scheduler armed one long `setTimeout` for the 21:00 slot. Node timers only count time
+  the machine is awake, and the Docker VM on the laptop stops with it: two naps in the
+  evening (19:05–19:17, 19:47–20:13) pushed the timer to 21:37. Meanwhile the 15-minute
+  catch-up poll, which checks the wall clock, saw the slot owed at 21:06 and sent it. The
+  late timer then fired without asking whether the slot was already satisfied. Fix: the timer
+  now re-arms every minute (`TIMER_TICK_MS`), so a nap can only delay a slot by the part of
+  the nap that overlaps it, and the timer path checks `slotAlreadyDelivered` before firing,
+  the same test the catch-up poll already used. Pinned by three tests in
+  `src/__tests__/scheduler.test.ts`.
