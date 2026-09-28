@@ -1,19 +1,22 @@
-"""Core Emulation Engine — generates mouse, keyboard and scroll input on this Mac.
+"""Core Emulation Engine — generates mouse, keyboard and scroll input on this computer.
 
 A tiny HTTP server on 127.0.0.1:4320 exposes the engine:
 
     GET  /         the control console (console/index.html, next to this folder)
-    GET  /status   {"status": "IDLE" | "RUNNING" | "STOPPING"}
+    GET  /status   {"status": "IDLE" | "RUNNING" | "STOPPING", "backend": ..., "platform": ...}
     POST /start    start the emulation loop in a background thread
     POST /stop     ask the loop to stop after its current step
 
 POST /start and /stop must carry the header `X-Engine-Control: 1` and, when
-sent by a browser, come from a page served on this Mac (see ALLOWED_ORIGIN_RE).
+sent by a browser, come from a page served on this computer (see ALLOWED_ORIGIN_RE).
 
-Run it with ./run.sh (or `.venv/bin/python engine/mac_engine.py`). It needs
-pyobjc's Quartz bindings (see requirements.txt / install.sh) and the terminal
-that launches it must be allowed under System Settings -> Privacy & Security ->
-Accessibility, otherwise macOS silently drops every posted event.
+Run it with ./run.sh on macOS and Linux or run.ps1 on Windows (or
+`.venv/bin/python engine/engine.py`). The input itself is posted by a backend
+picked for the platform in engine/backends/: Quartz (pyobjc) on macOS, where
+the terminal that launches it must be allowed under System Settings ->
+Privacy & Security -> Accessibility or macOS silently drops every event;
+pynput on Windows and Linux (X11 only). ENGINE_BACKEND=fake runs everything
+without generating input, which is how the tests work.
 """
 
 import sys
@@ -23,8 +26,6 @@ import signal
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
-import subprocess
-import time
 import random
 import math
 
@@ -34,54 +35,18 @@ import math
 # error messages below arrive hours late. Done before any print in this file.
 sys.stdout.reconfigure(line_buffering=True)
 
-
-def _import_quartz():
-    from Quartz.CoreGraphics import (
-        CGEventCreateMouseEvent, CGEventPost, kCGHIDEventTap,
-        kCGEventMouseMoved, kCGEventLeftMouseDown, kCGEventLeftMouseUp,
-        CGEventCreate, CGEventGetLocation, CGEventCreateKeyboardEvent,
-        CGEventCreateScrollWheelEvent, kCGScrollEventUnitLine
-    )
-    return (
-        CGEventCreateMouseEvent, CGEventPost, kCGHIDEventTap,
-        kCGEventMouseMoved, kCGEventLeftMouseDown, kCGEventLeftMouseUp,
-        CGEventCreate, CGEventGetLocation, CGEventCreateKeyboardEvent,
-        CGEventCreateScrollWheelEvent, kCGScrollEventUnitLine
-    )
-
+from backends import get_backend
+from backends.base import pause, SLEEP_SCALE
 
 try:
-    try:
-        _quartz = _import_quartz()
-    except ImportError:
-        # --- LEGACY ENVIRONMENT PATH BOOTSTRAP ---
-        # WHY: the engine was originally launched by a Node process with the bare
-        # system `python3`, where pyobjc lived only in the user's Python 3.9
-        # site-packages and was not always on sys.path. Inside the .venv that
-        # install.sh creates the import above succeeds and this block never runs;
-        # the legacy paths are only appended (never put first) so they can never
-        # shadow the packages the venv installed.
-        user_site_packages = os.path.expanduser("~/Library/Python/3.9/lib/python/site-packages")
-        command_line_packages = "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/site-packages"
-        for legacy_path in (user_site_packages, command_line_packages):
-            if legacy_path not in sys.path:
-                sys.path.append(legacy_path)
-        _quartz = _import_quartz()
-except ImportError as err:
+    backend = get_backend()
+except (ImportError, ValueError) as err:
     print(f"\n[Error] Module load failed: {err}")
-    print("[Error] Quartz (pyobjc) is not installed for this interpreter. Run ./install.sh and start the engine with ./run.sh.")
     sys.exit(1)
-
-(
-    CGEventCreateMouseEvent, CGEventPost, kCGHIDEventTap,
-    kCGEventMouseMoved, kCGEventLeftMouseDown, kCGEventLeftMouseUp,
-    CGEventCreate, CGEventGetLocation, CGEventCreateKeyboardEvent,
-    CGEventCreateScrollWheelEvent, kCGScrollEventUnitLine
-) = _quartz
 
 # WHY 127.0.0.1: the engine drives THIS machine's mouse and keyboard, so it must
 # never be reachable from the network — only pages and tools running on the same
-# Mac may talk to it. The port can be overridden with PORT for local clashes,
+# computer may talk to it. The port can be overridden with PORT for local clashes,
 # the bind address deliberately cannot.
 BIND_HOST = '127.0.0.1'
 # WHY 4320: one above task-notif's 4310 so the two local tools never collide.
@@ -105,7 +70,7 @@ thread_lock = threading.Lock()
 # WHY an allow-list instead of '*': binding to loopback keeps other machines
 # out, but not the user's own browser — with '*' any web page they visited
 # could POST /start from JavaScript and drive their mouse. Only pages served
-# from this Mac (the console, or a tool on another local port) are reflected;
+# from this computer (the console, or a tool on another local port) are reflected;
 # every other Origin gets no CORS headers at all, so the browser blocks it.
 ALLOWED_ORIGIN_RE = re.compile(r'^http://(127\.0\.0\.1|localhost)(:\d{1,5})?$')
 # WHY a custom header on /start and /stop: a plain POST is a "simple request"
@@ -120,116 +85,36 @@ SHUTDOWN_JOIN_SECONDS = 2
 
 # --- FIXED ABSOLUTE TELEMETRY INJECTION KEYBOARD MATRIX ---
 # Strictly bound to pure navigation safe arrow keys as requested
-# WHY these key codes: macOS virtual key codes 123/124/125/126 are Left/Right/
-# Down/Up arrow. Arrow keys move a caret or selection but never type a character
-# or trigger a shortcut on their own, so they are the safest keys to inject.
-CORE_DENSE_KEYS = [123, 124, 125, 126]
-# WHY 56: virtual key code for the left Shift key — a modifier that does nothing
-# on its own, mixed into the burst so it is not 100% arrow keys.
-SHIFT_MODIFIER = 56
-# WHY 48: virtual key code for Tab, used with Cmd held for the app switcher.
-TAB_KEY = 48
-# WHY 124: virtual key code for Right arrow, used with Cmd+Option to move to the
-# next browser tab.
-RIGHT_ARROW = 124
-# WHY 55: virtual key code for the left Command key.
-COMMAND_KEY = 55
-# WHY 1048576 (0x100000): kCGEventFlagMaskCommand. A Tab event must carry the
-# Command flag or the app switcher treats it as a plain Tab keypress.
-FLAG_COMMAND = 1048576
-# WHY 1572864 (0x180000): kCGEventFlagMaskCommand | kCGEventFlagMaskAlternate,
-# i.e. Cmd+Option — Cmd+Option+Right is "next tab" in Safari and Chrome.
-FLAG_COMMAND_OPTION = 1572864
+# WHY arrows: they move a caret or selection but never type a character or
+# trigger a shortcut on their own, so they are the safest keys to inject. The
+# backend maps these names to its platform's key codes (123-126 on macOS).
+CORE_DENSE_KEYS = ["left", "right", "down", "up"]
+# WHY shift: a modifier that does nothing on its own, mixed into the burst so
+# it is not 100% arrow keys (key code 56 on macOS).
+SHIFT_MODIFIER = "shift"
 
 # Global application sequence loop counter
 app_cycle_index = 1
 
-def get_mouse_pos():
-    event = CGEventCreate(None)
-    pointer = CGEventGetLocation(event)
-    return pointer.x, pointer.y
-
-def post_mouse_event(x, y, event_type):
-    event = CGEventCreateMouseEvent(None, event_type, (x, y), 0)
-    CGEventPost(kCGHIDEventTap, event)
-
-def post_dense_keystroke(key_code):
-    down = CGEventCreateKeyboardEvent(None, key_code, True)
-    CGEventPost(kCGHIDEventTap, down)
-    # WHY 0.012-0.025 s: a real key press is held roughly 10-25 ms. Shorter looks
-    # synthetic; much longer risks the OS starting key repeat.
-    time.sleep(random.uniform(0.012, 0.025))
-    up = CGEventCreateKeyboardEvent(None, key_code, False)
-    CGEventPost(kCGHIDEventTap, up)
-
-def CGEventSetFlags(event, flags):
-    from Quartz.CoreGraphics import CGEventSetFlags as _CGEventSetFlags
-    _CGEventSetFlags(event, flags)
-
-def get_total_visible_apps_count():
-    """Queries macOS desktop server to dynamically get the count of all open active windows apps"""
-    script = 'tell application "System Events" to get count of (every process whose background only is false)'
-    try:
-        # WHY timeout=5: the first call can pop macOS's Automation permission
-        # dialog, which blocks osascript until someone clicks; without a timeout
-        # the worker would hang there and /stop could never end the loop.
-        output = subprocess.check_output(["osascript", "-e", script], timeout=5).decode().strip()
-        # WHY 5: if System Events refuses (no Automation permission) or answers
-        # oddly, assume five visible apps so Cmd+Tab still cycles a plausible depth.
-        return int(output) if output.isdigit() else 5
-    except Exception:
-        return 5
 
 def simulate_real_app_switch():
     """Sequential multi-strike layout with sustained hold times to ensure deep background windows swap context"""
     global app_cycle_index
 
-    total_apps = get_total_visible_apps_count()
+    total_apps = backend.visible_app_count()
 
     if app_cycle_index >= total_apps:
         app_cycle_index = 1
 
     print(f"  [System Shift] Navigating next app in loop sequence. Open Apps Counter: {total_apps}. Striking Tab {app_cycle_index} time(s).")
 
-    cmd_down = CGEventCreateKeyboardEvent(None, COMMAND_KEY, True)
-    CGEventPost(kCGHIDEventTap, cmd_down)
-    # WHY 0.08 s: gives the app switcher time to appear before the first Tab.
-    time.sleep(0.08)
-
-    for _ in range(app_cycle_index):
-        tab_down = CGEventCreateKeyboardEvent(None, TAB_KEY, True)
-        CGEventSetFlags(tab_down, FLAG_COMMAND)
-        CGEventPost(kCGHIDEventTap, tab_down)
-        # WHY 0.05 s: hold Tab long enough to register as a distinct press.
-        time.sleep(0.05)
-
-        tab_up = CGEventCreateKeyboardEvent(None, TAB_KEY, False)
-        CGEventSetFlags(tab_up, FLAG_COMMAND)
-        CGEventPost(kCGHIDEventTap, tab_up)
-        # WHY 0.18 s: the switcher needs a beat between Tabs to advance one app
-        # per press instead of collapsing them into one.
-        time.sleep(0.18)
-
-    # WHY 0.30 s: let the switcher settle on the highlighted app so releasing
-    # Command actually activates it.
-    time.sleep(0.30)
-    cmd_up = CGEventCreateKeyboardEvent(None, COMMAND_KEY, False)
-    CGEventPost(kCGHIDEventTap, cmd_up)
+    backend.app_switch(app_cycle_index)
 
     app_cycle_index += 1
 
 def hardware_browser_tab_switch():
     print("  [Browser Shift] Cycling active browser tab index natively...")
-    combined_flags = FLAG_COMMAND_OPTION
-    down = CGEventCreateKeyboardEvent(None, RIGHT_ARROW, True)
-    CGEventSetFlags(down, combined_flags)
-    CGEventPost(kCGHIDEventTap, down)
-    # WHY 0.05-0.10 s: a chord is held a little longer than a plain key so the
-    # browser sees the modifiers and the arrow together.
-    time.sleep(random.uniform(0.05, 0.10))
-    up = CGEventCreateKeyboardEvent(None, RIGHT_ARROW, False)
-    CGEventSetFlags(up, combined_flags)
-    CGEventPost(kCGHIDEventTap, up)
+    backend.browser_tab_next()
 
 def simulate_vertical_scrolling(stop):
     direction = random.choice([-1, 1])
@@ -238,11 +123,10 @@ def simulate_vertical_scrolling(stop):
     print(f"  [Scroll Active] Generating smooth vertical scrolling. Lines: {scroll_lines}")
     for _ in range(scroll_lines):
         if stop.is_set(): break
-        scroll_event = CGEventCreateScrollWheelEvent(None, kCGScrollEventUnitLine, 1, direction)
-        CGEventPost(kCGHIDEventTap, scroll_event)
+        backend.scroll(1, direction)
         # WHY 0.15-0.30 s: the cadence of wheel notches; a tighter stream would
         # look like a trackpad gesture rather than a wheel.
-        time.sleep(random.uniform(0.15, 0.30))
+        pause(random.uniform(0.15, 0.30))
 
 def bezier_point(p0_x, p0_y, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y, t):
     x = (1-t)**3 * p0_x + 3*(1-t)**2 * t * p1_x + 3*(1-t) * t**2 * p2_x + t**3 * p3_x
@@ -272,9 +156,9 @@ def move_humanlike_adaptive(start_x, start_y, end_x, end_y, stop):
         # and stops with zero velocity like a hand does.
         t_eased = 10 * t**3 - 15 * t**4 + 6 * t**5
         target_x, target_y = bezier_point(start_x, start_y, p1_x, p1_y, p2_x, p2_y, end_x, end_y, t_eased)
-        post_mouse_event(target_x, target_y, kCGEventMouseMoved)
+        backend.move_mouse(target_x, target_y)
         # WHY 5-10 ms between samples: 100-200 Hz, the report rate of a USB mouse.
-        time.sleep(random.uniform(0.005, 0.010))
+        pause(random.uniform(0.005, 0.010))
 
 def loop_worker(stop):
     """The emulation loop. `stop` is this worker's own Event; /stop sets it."""
@@ -283,7 +167,7 @@ def loop_worker(stop):
     print("=====================================================")
 
     while not stop.is_set():
-        curr_x, curr_y = get_mouse_pos()
+        curr_x, curr_y = backend.mouse_position()
         # WHY ±300 px clamped to x 200..1100, y 200..650: a random hop that stays
         # in the middle of a 13" display (1280x800 points), away from the menu
         # bar, the Dock and the hot corners.
@@ -300,10 +184,10 @@ def loop_worker(stop):
             # WHY 0.22: roughly one stroke in five is a bare Shift, so the burst
             # is not a pure run of arrow keys.
             if random.random() < 0.22:
-                post_dense_keystroke(SHIFT_MODIFIER)
+                backend.tap_key(SHIFT_MODIFIER)
             else:
-                post_dense_keystroke(random.choice(CORE_DENSE_KEYS))
-            time.sleep(random.uniform(0.12, 0.28))
+                backend.tap_key(random.choice(CORE_DENSE_KEYS))
+            pause(random.uniform(0.12, 0.28))
         print(f"  - Distributed {strokes} safe telemetry hits over separate execution ticks.")
 
         # WHY 30 / 30 / 40 %: app switch, browser tab switch and scrolling are
@@ -317,13 +201,11 @@ def loop_worker(stop):
             simulate_vertical_scrolling(stop)
 
         # WHY 0.22: about one cycle in five ends with a click where the pointer
-        # already is; 0.04 s settle before and a 0.02 s hold is a light click.
+        # already is; 0.04 s settle before (the 0.02 s hold is in the backend).
         if random.random() < 0.22:
-            time.sleep(0.04)
-            fx, fy = get_mouse_pos()
-            post_mouse_event(fx, fy, kCGEventLeftMouseDown)
-            time.sleep(0.02)
-            post_mouse_event(fx, fy, kCGEventLeftMouseUp)
+            pause(0.04)
+            fx, fy = backend.mouse_position()
+            backend.click(fx, fy)
 
         # --- FINAL PERFECT BRACKET TIMING ADJUSTMENT FOR 41% - 44% RE-LOCK ---
         # WHY 9.5-12.5 s: with the 3-5 s of activity above, one cycle lasts
@@ -332,18 +214,9 @@ def loop_worker(stop):
         # model of this cadence, not the source of these numbers; see lessons.md.
         # WHY stop.wait() and not time.sleep(): /stop wakes the worker at once
         # instead of leaving it asleep for up to 12.5 s.
-        stop.wait(random.uniform(9.5, 12.5))
+        # WHY the scale: the same ENGINE_FAST factor pause() applies (tests only).
+        stop.wait(random.uniform(9.5, 12.5) * SLEEP_SCALE)
     print("[Core Engine] Emulation loop ended.")
-
-
-def release_command_key():
-    """Post a Command key-up. Called on shutdown in case the worker was killed
-    mid Cmd+Tab: a synthetic modifier that is never released stays held for the
-    whole login session, and every later click and keystroke gets Cmd added."""
-    try:
-        CGEventPost(kCGHIDEventTap, CGEventCreateKeyboardEvent(None, COMMAND_KEY, False))
-    except Exception as err:  # never let a Quartz hiccup block the exit
-        print(f"[Shutdown] could not post Command key-up: {err}")
 
 
 def engine_state():
@@ -416,7 +289,7 @@ class EngineBridgeHandler(BaseHTTPRequestHandler):
         if path == '/status':
             with thread_lock:
                 state = engine_state()
-            self._send_json({"status": state})
+            self._send_json({"status": state, "backend": backend.name, "platform": sys.platform})
         elif path in ('/', '/index.html'):
             self._send_console()
         else:
@@ -467,17 +340,33 @@ class EngineBridgeHandler(BaseHTTPRequestHandler):
         self._send_json(payload, status=status)
 
 
+def shutdown_engine():
+    """Stop the loop, give it SHUTDOWN_JOIN_SECONDS to finish its step, then
+    release the switcher modifier. Shared by main() and the tests."""
+    with thread_lock:
+        stop_event.set()
+        worker = engine_thread
+    if worker is not None and worker.is_alive():
+        print("\n[Shutdown] waiting for the emulation loop to finish its step...")
+        worker.join(SHUTDOWN_JOIN_SECONDS)
+    # Always, even when no loop ran: it is one harmless event and it is
+    # the only thing standing between a killed worker and a stuck modifier.
+    backend.release_modifiers()
+
+
 def _on_sigterm(signum, frame):
     # WHY raise KeyboardInterrupt: run.sh's trap sends SIGTERM; funnelling it
     # into the same path as Ctrl-C gives one shutdown sequence for both.
     raise KeyboardInterrupt
 
-if __name__ == "__main__":
+def main():
     signal.signal(signal.SIGTERM, _on_sigterm)
     server = HTTPServer((BIND_HOST, PORT), EngineBridgeHandler)
+    width, height = backend.screen_size()
     print("=========================================================")
     print(f"🚀 TARGET-CALIBRATED ENGINE V20.0 ON PORT {PORT}")
     print(f"   Console: http://{BIND_HOST}:{PORT}/")
+    print(f"   Backend: {backend.name} on {sys.platform} ({backend.platform_note}); screen {width}x{height}")
     print("=========================================================")
     try:
         server.serve_forever()
@@ -485,13 +374,8 @@ if __name__ == "__main__":
         pass
     finally:
         server.server_close()
-        with thread_lock:
-            stop_event.set()
-            worker = engine_thread
-        if worker is not None and worker.is_alive():
-            print("\n[Shutdown] waiting for the emulation loop to finish its step...")
-            worker.join(SHUTDOWN_JOIN_SECONDS)
-        # Always, even when no loop ran: it is one harmless event and it is
-        # the only thing standing between a killed worker and a stuck Cmd key.
-        release_command_key()
+        shutdown_engine()
         print("Shutdown complete.")
+
+if __name__ == "__main__":
+    main()

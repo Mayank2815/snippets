@@ -71,7 +71,7 @@
 <div class="wrap">
   <header>
     <h1>Core Emulation Engine Control Console</h1>
-    <p>Generates mouse, keyboard and scroll input on <strong>this Mac only</strong>. The engine listens on <span class="pill" id="engine-url">127.0.0.1:4320</span>.</p>
+    <p>Generates mouse, keyboard and scroll input on <strong>this computer only</strong>. The engine listens on <span class="pill" id="engine-url">127.0.0.1:4320</span>. <span id="backend-line">backend: —</span></p>
   </header>
 
   <section class="card">
@@ -92,10 +92,11 @@
   <section class="card">
     <h2>Notes</h2>
     <p class="muted">
-      This page is served by the engine itself, so it only works while <code>./run.sh</code> is running on this Mac.
+      This page is served by the engine itself, so it only works while <code>./run.sh</code> (macOS, Linux) or
+      <code>.\run.ps1</code> (Windows) is running on this computer.
       Once started, the engine moves the pointer and presses navigation keys in whatever window is in front.
-      Press Stop here, or Ctrl-C in the terminal, to end it. If nothing moves after Start, allow your terminal app under
-      System Settings → Privacy &amp; Security → Accessibility.
+      Press Stop here, or Ctrl-C in the terminal, to end it. If nothing moves after Start on a Mac, allow your terminal app under
+      System Settings → Privacy &amp; Security → Accessibility; on Linux the engine needs an X11 session, not Wayland.
     </p>
   </section>
 </div>
@@ -119,6 +120,7 @@
   var stopBtn = document.getElementById('stop');
   var errorLine = document.getElementById('error');
   var lastChecked = document.getElementById('last-checked');
+  var backendLine = document.getElementById('backend-line');
   var busy = false;
 
   function render(state, detail) {
@@ -144,12 +146,14 @@
         return res.json();
       })
       .then(function (data) {
+        // Which input backend the engine picked (quartz on darwin, pynput on win32/linux, fake in tests).
+        if (data.backend) backendLine.textContent = 'backend: ' + data.backend + ' on ' + (data.platform || '?');
         if (data.status === 'RUNNING') render('RUNNING', 'Emulation loop is active — the pointer and keys are being driven.');
         else if (data.status === 'STOPPING') render('STOPPING', 'Finishing the current step — Start comes back in a moment.');
         else render('IDLE', 'Engine is up and waiting.');
       })
       .catch(function (err) {
-        render('OFFLINE', 'Engine is not answering — start it with ./run.sh on this Mac.');
+        render('OFFLINE', 'Engine is not answering — start it with ./run.sh (or run.ps1 on Windows) on this computer.');
         if (busy) setError(err.message);
       });
   }

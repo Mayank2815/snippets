@@ -2,6 +2,82 @@
 
 Dated, newest first. Add to this file whenever the engine bites you.
 
+## 2026-09-28 — running on Windows and Linux: the backend layer
+
+- **Why a backend layer and not a second script.** The obvious move — copy
+  `mac_engine.py` to `win_engine.py` — would have duplicated the HTTP server,
+  the CORS allow-list, the STOPPING/409 state machine and every calibrated
+  timing constant, and the two copies would have drifted on the first bug fix.
+  Instead `engine.py` keeps all of that exactly as it was and calls ten methods
+  on a backend object; `engine/backends/` holds one small file per platform.
+  The split line is "does this touch the operating system?" — cadence,
+  probabilities and the target rectangle stayed in the loop, key codes and
+  event posting moved out. The loop now names keys (`'left'`, `'shift'`) and
+  each backend maps them to its own codes, which is what let the macOS key-code
+  table leave `engine.py` without any behaviour change.
+
+- **Wayland silently eats synthetic input.** pynput posts through the X11 XTest
+  extension. On a Wayland session it connects to XWayland and every call
+  *succeeds* — no error, no exception — but the compositor never delivers those
+  events to native Wayland windows. The symptom is identical to the macOS
+  missing-Accessibility case: `/status` says RUNNING, the log prints its
+  "[Scroll Active]" lines, nothing on screen moves. Both `install.sh` and the
+  backend constructor now check `XDG_SESSION_TYPE` and print a warning, because
+  nothing downstream can detect it.
+
+- **Do not `import pynput` to check that the install worked.** On Linux the
+  import connects to the X server immediately and raises without `DISPLAY`
+  (over SSH, in a container, in CI) — which says nothing about whether pip
+  succeeded. `install.sh` uses `importlib.util.find_spec("pynput")` instead.
+
+- **pynput drags in a compiler on Linux.** It depends on `evdev`, a C extension
+  with no binary wheel, so pip needs gcc and the Python and kernel headers.
+  `install.sh` catches the failure and prints
+  `sudo apt install build-essential python3-dev`. Debian and Ubuntu also ship
+  `python3` without the venv module, hence the separate `python3-venv` hint.
+
+- **`xvfb-run` hangs in a slim container.** Its "server is ready" handshake
+  relies on a SIGUSR1 from Xvfb that never arrived in `python:3.12-slim`, so the
+  proof run sat there until it was killed; it also needs `xauth`, which the slim
+  image lacks. Starting `Xvfb :99` by hand and exporting `DISPLAY=:99` is what
+  works, and is what the cheatsheet documents.
+
+- **A fake backend is what makes the engine testable at all.** Before this there
+  was no way to exercise `/start` on a developer's machine — the previous review
+  had to hand-stub Quartz in a copy of the file. `ENGINE_BACKEND=fake` now runs
+  the real server, the real loop and the real shutdown path while recording
+  calls to a list, and `ENGINE_FAST=1` scales every sleep by 0.01 so a full
+  cycle takes milliseconds instead of 13–17 s. Ten tests cover status, the
+  console, start/stop, the STOPPING→409 race, the header guard and the CORS
+  allow-list, and they run in about 2.5 s.
+
+- **Testing the STOPPING window needs a gate, not a sleep.** With fast sleeps a
+  cycle finishes so quickly that a `/stop` is usually already IDLE by the time
+  the next request lands, making a 409 test flaky. The fake backend has an
+  optional `gate` Event: every call blocks on it, which parks the worker inside
+  a step so STOPPING is observable deterministically.
+
+- **`sys.path` matters for `engine/tests/`.** The tests insert the `engine/`
+  directory at the front of `sys.path` so `import engine` finds `engine.py` and
+  not a namespace package named after the `engine/` folder. `engine.py` itself
+  imports `backends` as a top-level package for the same reason — it is run as
+  a script, not as part of a package.
+
+- **What was tested where.** macOS: the real Quartz backend was started on a
+  spare port and checked over HTTP only (`/status` reports
+  `backend: quartz, platform: darwin`, the console renders, CORS and the header
+  guard behave) — `/start` was never sent to a Quartz engine, so the macOS
+  *input* path is unchanged-by-inspection, not re-proven. Linux: fully
+  exercised in Docker under a headless Xvfb — install, `/status` reporting
+  `pynput`/`linux`, `/start`, RUNNING, `/stop`, IDLE, clean SIGTERM exit, and a
+  direct backend check where `move_mouse(321, 654)` read back as exactly
+  `(321, 654)`. **Windows: not executed — no Windows machine was available.**
+  Its code path is covered only by the fake-backend tests (which exercise the
+  shared loop and server), by a PowerShell 7 parse check of `install.ps1` and
+  `run.ps1`, and by review. `EnumWindows`, `SendInput` through pynput, the
+  `netstat` port check and `Start-Process` all remain unverified on real
+  hardware.
+
 ## 2026-09-28 — review findings: the double-loop race and the CORS hole
 
 - **Stop-then-Start could run two loops at once.** `/stop` only cleared a
@@ -44,7 +120,8 @@ Dated, newest first. Add to this file whenever the engine bites you.
 
 ## 2026-09-28 — the extraction from task-notif
 
-- **The source file was two copies of itself.** `mac_engine.py` in task-notif
+- **The source file was two copies of itself.** `mac_engine.py` (renamed to
+  `engine.py` on 2026-09-28) in task-notif
   was ~245 lines of a commented-out "V19.0" copy followed by the live "V20.0"
   code. The only real differences were the end-of-cycle sleep (11–14 s in
   V19, 9.5–12.5 s in V20) and the banner. Only the live code was kept; if you
@@ -98,19 +175,20 @@ Dated, newest first. Add to this file whenever the engine bites you.
 
 ## Behaviour of the engine itself
 
-- **Accessibility permission is per launching app, not per script.** macOS
+- **Accessibility permission is per launching app, not per script.** (macOS.) macOS
   grants "may control this computer" to the process that owns the TTY —
   Terminal, iTerm, VS Code — and only to processes started *after* the toggle.
   Symptom of a missing grant: `/status` says RUNNING, the terminal prints the
   "[Scroll Active]" / "[System Shift]" lines, and nothing on screen happens,
   with no error anywhere. Quit and reopen the terminal after toggling.
 
-- **`osascript` may prompt the first time.** `get_total_visible_apps_count()`
+- **`osascript` may prompt the first time.** (macOS.) `visible_app_count()`
   asks System Events for the app count, which needs the Automation permission
   for your terminal. macOS shows a one-time dialog; decline it and the count
   silently falls back to 5 (so Cmd+Tab still cycles, just not adaptively).
 
-- **Cmd+Tab needs real hold times.** The 80 ms after Command-down, 180 ms
+- **Cmd+Tab needs real hold times.** (Alt+Tab too — the pynput backend copies
+  the same numbers.) The 80 ms after Command-down, 180 ms
   between Tabs and 300 ms before Command-up are not decoration: shorter values
   make the app switcher collapse the presses into one or never appear.
 
