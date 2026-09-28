@@ -297,14 +297,24 @@ proves `import Quartz.CoreGraphics` works from the venv, and prints the
 Accessibility steps.
 
 On Linux it runs a **preflight before doing any work**: it checks `ensurepip`,
-a C compiler, `Python.h` and `linux/input.h`, and prints a single
-`sudo apt install build-essential python3-dev python3-venv` line naming
-whatever is missing. All three are needed on a stock Ubuntu desktop — Ubuntu
-splits `venv` out of `python3`, and pynput's `evdev` dependency ships as source
-with **no wheels for any architecture**, so everyone compiles it. Without the
-preflight a fresh machine failed twice in a row with a different apt line each
-time. The preflight only insists on Debian/Ubuntu, where those package names
-are correct; elsewhere it names what is missing and continues.
+a C compiler, `Python.h` and `linux/input.h`, and prints a single install
+command naming whatever is missing. All three are needed on a stock Ubuntu
+desktop — Ubuntu splits `venv` out of `python3`, and pynput's `evdev`
+dependency ships as source with **no wheels for any architecture** (x86_64
+measured, not assumed), so everyone compiles it. Without the preflight a fresh
+machine failed twice in a row with a different install line each time.
+
+The command itself comes from **`packages.sh`**, a sourced, side-effect-free
+bash file with three lookups: `pkg_manager` (which of apt, dnf, pacman or
+zypper is on PATH), `pkg_name` (what an abstract requirement is called there —
+`python3-dev` on Debian, `python3-devel` on Fedora and openSUSE, part of plain
+`python` on Arch) and `pkg_install_command` (the whole sorted, deduplicated
+line). `install.sh` asks for requirements, never for package names, in all five
+places it used to hard-code apt. When no manager is recognised it prints the
+requirements in plain words and continues rather than naming a package that
+does not exist. Because the only input is "which binary is on PATH",
+`engine/tests/test_packages.py` covers every branch by faking a distribution
+with a temp directory of empty executables — no container needed.
 
 It then warns when `wmctrl` is missing (optional), asks
 `linux_session.check()` for the session verdict and prints the message and

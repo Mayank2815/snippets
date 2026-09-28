@@ -2,6 +2,152 @@
 
 Dated, newest first. Add to this file whenever the engine bites you.
 
+## 2026-09-29 — one apt line for every distribution, and x86_64 at last
+
+Everything below this entry was proven on **aarch64 only** (Colima on Apple
+Silicon) and on **Debian/Ubuntu only**. A colleague is about to run this on an
+unknown Linux box that is almost certainly x86_64 and may not be Ubuntu, so both
+gaps were closed by measurement.
+
+### x86_64 changes nothing — including the part we hoped it would
+
+Ubuntu 24.04.5 under `--platform linux/amd64` (qemu), non-root user, Xvfb,
+Openbox, two xterms, the documented `./install.sh` then `./run.sh --no-open`
+path. `uname -m` = `x86_64`, Python 3.12.3. Result: **identical to aarch64 in
+every respect** — same preflight output, same three apt packages, same
+`{"status": "IDLE", "backend": "pynput", "platform": "linux",
+"inputWorking": true}`, and after `POST /start` the pointer went from
+`x:640 y:400` to `x:359 y:276` with 40 RawMotion, 43 RawKeyPress and 2
+RawButton from `xinput test-xi2 --root`. Nothing about the backend, the timings
+or the install is architecture-specific, and nothing had to change.
+
+**`evdev` has no x86_64 wheel either.** This was the one thing that might have
+made the build-tools preflight unnecessary on the common architecture, so it was
+tested directly rather than assumed:
+
+```
+$ .venv/bin/pip download --no-deps --only-binary=:all: -d /tmp/wheelprobe evdev
+ERROR: Could not find a version that satisfies the requirement evdev (from versions: none)
+ERROR: No matching distribution found for evdev
+```
+
+`from versions: none` under `--only-binary` means PyPI publishes an sdist and
+nothing else, for every platform. Arch on x86_64 independently confirmed it by
+failing the same evdev compile for a missing C compiler. So the compiler
+preflight is needed on every Linux machine, on every architecture — as the
+2026-09-28 entry claimed, now actually checked on x86_64.
+
+### The apt line was not merely unhelpful elsewhere — it was wrong
+
+On a fresh Fedora 44 container with python3 but no toolchain, `./install.sh`
+detected the missing pieces correctly and then said:
+
+```
+    build-essential — a C compiler, to build pynput's evdev dependency
+    python3-dev     — Python.h, which evdev needs to build
+install.sh: install the equivalents for your distribution, then re-run if the install below fails.
+...
+install.sh: compiler/header (gcc, Python.h, linux/input.h), install the build tools with:
+    sudo apt install build-essential python3-dev
+```
+
+Neither package name exists on Fedora, and the command names a package manager
+the machine does not have. It then carried on to the evdev compile, which failed
+with a 53-line C-extension traceback. openSUSE Tumbleweed printed the same two
+wrong names; Arch printed `build-essential` alone (its unsplit `python` package
+already supplies `Python.h`, so only the compiler check fired). In every case the
+user is left reading a compiler error with an instruction that cannot work.
+
+**The fix is `packages.sh`** — a sourced, side-effect-free bash file with three
+lookups: which manager is on PATH, what each abstract requirement is called
+there, and how to phrase the whole command. `install.sh` now asks for `venv`,
+`compiler`, `kernel_headers` and `python_headers` rather than for Debian package
+names, in all five places it used to hard-code apt (the preflight, the
+`python3`-missing message, the venv-creation failure, the pip failure and the
+wmctrl note).
+
+Measured afterwards, same containers:
+
+| Distribution | First run said | Now says |
+|---|---|---|
+| Ubuntu 24.04 x86_64, Debian 12 | `sudo apt install build-essential python3-dev python3-venv` | **byte-identical** |
+| Fedora 44 | `sudo apt install build-essential python3-dev` | `sudo dnf install gcc python3-devel` |
+| Arch (x86_64) | `sudo apt install build-essential` | `sudo pacman -S base-devel` |
+| openSUSE Tumbleweed | `sudo apt install build-essential python3-dev` | `sudo zypper install gcc python3-devel` |
+
+Following the new instruction and re-running got Fedora, Arch, openSUSE and
+Debian 12 to a working engine that moved the pointer — 38/37, 38/35, 38/40 and
+39/43 RawMotion/RawKeyPress respectively, all with `POINTER: MOVED`.
+
+### Things that only show up once you leave Debian
+
+- **The package names differ more than the commands do.** The verb is the easy
+  part; `python3-dev` vs `python3-devel` vs `python` is what actually breaks
+  people. Arch folds *three* of our four requirements into one `python` package,
+  so `pkg_install_command` has to sort and deduplicate or it prints
+  `sudo pacman -S base-devel python python` — which is why that dedup has a test
+  of its own.
+- **Only Debian and Ubuntu split out `venv`.** Fedora ships ensurepip inside
+  `python3-libs`, Arch and openSUSE inside their Python package. So the Fedora
+  and openSUSE lines are two packages, not three, and the missing-venv branch
+  never fires there at all. A lookup table that insisted on naming a venv package
+  everywhere would have printed something that does not exist.
+- **Detect by "is the binary on PATH", not by `/etc/os-release`.** Mint, Pop!_OS,
+  Zorin, Nobara, EndeavourOS and Manjaro are all derivatives that keep their
+  parent's package manager, and there is no end to that list. Which is also why
+  Mint and Pop!_OS were not tested separately here: they are Ubuntu with a
+  different theme, and `apt` is `apt`.
+- **apt is checked first on purpose.** A machine with both (someone installed dnf
+  on Ubuntu) must keep taking the Debian branch, whose wording is the one that
+  was already proven. There is a test for exactly that.
+- **Keep the Debian output byte-identical, and prove it.** The old and new
+  preflight output were diffed on Ubuntu 24.04 x86_64 and Debian 12 aarch64:
+  zero difference. The exact string
+  `sudo apt install build-essential python3-dev python3-venv` is quoted in the
+  README and in this file, so a test pins it.
+- **`readarray` is bash 4.** The original dedup used it, which was fine because
+  it only ran on Linux — but the new tests source `packages.sh` on whatever
+  machine runs `make test`, and macOS still ships bash 3.2. A `while read` loop
+  does the same job everywhere.
+
+### The tests fake a distro with a directory
+
+`engine/tests/test_packages.py` builds a temp directory holding empty executable
+files named `dnf` or `pacman`, sets `PATH` to **only** that directory, and
+sources `packages.sh`. That is a whole Fedora or Arch machine as far as the
+lookup is concerned, so all 35 new tests run in milliseconds on a Mac with no
+container, no root and no distro. Two details make it work: `PATH` is replaced
+rather than prepended, so a real `apt` on the test host cannot leak into an
+"this is Arch" case; and `sort` — the one external command the lookup uses — is
+symlinked into the fake bin, while `bash` itself has to be launched by absolute
+path because the replaced `PATH` cannot find it.
+
+### Container quirks that are not product bugs
+
+- **Arch's pacman fails under qemu** with `error restricting syscalls via
+  seccomp: 22` — its sandbox cannot initialise in x86_64 emulation on an arm64
+  host. `--disable-sandbox` works around it. That flag is a property of the test
+  rig, not of the instruction we print; on real Arch hardware
+  `sudo pacman -S base-devel` is the whole command.
+- **Arch publishes no official arm64 image**, so Arch was necessarily tested
+  under `--platform linux/amd64` — which incidentally gave a second x86_64
+  data point for free.
+- The 2026-09-28 note still holds everywhere: `xvfb-run` hangs, start
+  `Xvfb :99` by hand; and `xev -root` sees zero keypresses for a healthy engine,
+  so count with `xinput test-xi2 --root`.
+
+### Still unproven
+
+**A real GNOME or KDE desktop session on Xorg.** Every run above used Openbox
+inside a container, which is a genuine window manager but not a full desktop:
+no GNOME Shell, no KWin, no session manager, no compositing, no
+`org.gnome.Settings` keyboard grabs. A desktop environment can take exclusive
+grabs and intercept the Alt+Tab and Ctrl+Tab chords before the focused window
+sees them, so the switcher steps in particular are the ones most likely to
+behave differently there. That cannot be reproduced in a container and was not
+attempted. Also unproven, unchanged from before: Windows on real hardware, and
+the macOS input path (`/start` is still never sent to a Quartz engine here).
+
 ## 2026-09-29 — the Wayland silent failure, and what a real Linux desktop showed
 
 The 2026-09-28 Linux support below was only ever proven inside a bare

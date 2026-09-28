@@ -99,8 +99,12 @@ curl -X POST -H 'X-Engine-Control: 1' http://127.0.0.1:4320/start     # CAREFUL:
 - **Linux** — must be an **X11/Xorg** session. `echo $XDG_SESSION_TYPE` must print `x11`; on
   `wayland` the engine refuses `/start` with 503 and the console shows a red INPUT UNAVAILABLE
   panel (Wayland discards synthetic XTest input). Fix: log out → click your name → gear icon →
-  "Ubuntu on Xorg" → log in. Packages: `sudo apt install build-essential python3-dev python3-venv`
-  (all three are required — `evdev` has no prebuilt wheels). `wmctrl` is optional (window count;
+  "Ubuntu on Xorg" → log in. Packages, printed by `install.sh` for whichever package manager
+  this box has: `sudo apt install build-essential python3-dev python3-venv` (Debian/Ubuntu),
+  `sudo dnf install gcc python3-devel` (Fedora), `sudo pacman -S base-devel python` (Arch),
+  `sudo zypper install gcc python3-devel` (openSUSE); an unrecognised manager gets the
+  requirements in words and no command. `evdev` has no prebuilt wheel for any architecture,
+  x86_64 included, so the compiler is always needed. `wmctrl` is optional (window count;
   falls back to 5).
 
 ```bash

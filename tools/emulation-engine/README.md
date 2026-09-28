@@ -22,8 +22,12 @@ self-contained: nothing else in the repo is needed to run it.
 The backend is chosen automatically from the platform. `GET /status` and the
 console header both report which one is active, e.g. `backend: quartz on darwin`.
 
-Verified end to end on macOS (Quartz), Ubuntu 22.04 and Ubuntu 24.04 (pynput on
-X11, on a desktop with a real window manager).
+Verified end to end on macOS (Quartz) and, for pynput on X11 with a real window
+manager, on Ubuntu 22.04 and 24.04, Debian 12, Fedora 44, Arch and openSUSE
+Tumbleweed — on both **x86_64** and **aarch64**. See
+[knowledge/lessons.md](knowledge/lessons.md) for what differed between them
+(almost nothing) and what is still unproven (a real GNOME or KDE desktop
+session, as opposed to a bare window manager).
 
 ## Quick start
 
@@ -52,10 +56,11 @@ your browser. Both are safe to run again at any time.
 
 You need Python 3.9 or newer. On macOS the Xcode Command Line Tools version
 (`xcode-select --install`) is enough; on Windows install it from python.org and
-tick "Add python.exe to PATH"; on Debian/Ubuntu you need
-`build-essential python3-dev python3-venv` (all three — see the Linux section
-for why). `install.sh` checks first and prints one `sudo apt install` line with
-everything that is missing, so you never have to guess.
+tick "Add python.exe to PATH"; on Linux you need a C compiler, the Python
+headers and (on Debian and Ubuntu only) Python's venv package — see the Linux
+section for why. `install.sh` checks first and prints one install command, in
+your own distribution's package manager, listing everything that is missing, so
+you never have to guess.
 
 ## macOS: the one manual step — Accessibility permission
 
@@ -111,22 +116,39 @@ echo $XDG_SESSION_TYPE
 
 ### Step 2 — install the system packages
 
-Ubuntu and Debian do not ship these by default. `./install.sh` checks for them
-and prints this exact line if any are missing, so you can also just run it and
-see:
+No distribution ships all of these by default. **You do not have to work out
+which ones you need or what they are called** — run `./install.sh`, and it
+checks first and prints the exact command for your distribution:
 
-```bash
-sudo apt install build-essential python3-dev python3-venv
-```
+| Your distribution | What `./install.sh` prints |
+|---|---|
+| Debian, Ubuntu, Mint, Pop!_OS, Zorin | `sudo apt install build-essential python3-dev python3-venv` |
+| Fedora, RHEL, CentOS Stream, Rocky, Alma, Nobara | `sudo dnf install gcc python3-devel` |
+| Arch, Manjaro, EndeavourOS | `sudo pacman -S base-devel python` |
+| openSUSE Leap and Tumbleweed, SLES | `sudo zypper install gcc python3-devel` |
+| anything else | the three requirements in plain words, and no command — see below |
 
-- `python3-venv` — Ubuntu splits the `venv` module out of `python3`, and
-  without it `./install.sh` cannot create its `.venv` folder.
-- `build-essential` and `python3-dev` — pynput depends on a package called
-  `evdev`, which is published as source only (there is no prebuilt version for
-  **any** processor), so pip has to compile it and needs a C compiler and the
-  Python and Linux headers.
+It only lists what is actually missing, so your line may be shorter than the
+one above. The three things being asked for are always the same:
 
-These are the same on Ubuntu 22.04 and 24.04. Then:
+- **A C compiler.** pynput depends on a package called `evdev`, which is
+  published as source only — there is no prebuilt version for **any**
+  processor, x86_64 included — so pip has to compile it.
+- **The Python development headers** (`Python.h`), which that compile needs.
+  This is the package whose name differs most: `python3-dev` on Debian and
+  Ubuntu, `python3-devel` on Fedora and openSUSE, and part of plain `python`
+  on Arch.
+- **Python's `venv` support**, so `./install.sh` can create its `.venv` folder.
+  Only Debian and Ubuntu split this into a separate package (`python3-venv`);
+  Fedora, Arch and openSUSE include it in Python itself, so their line does not
+  mention it.
+
+If your distribution is not one of the four above, `./install.sh` says so
+plainly and names those three requirements in words rather than guessing a
+package name that does not exist on your system. Install them however your
+distribution does it, then carry on.
+
+Then:
 
 ```bash
 ./install.sh
@@ -136,7 +158,9 @@ These are the same on Ubuntu 22.04 and 24.04. Then:
 ### Optional: `wmctrl`
 
 ```bash
-sudo apt install wmctrl
+sudo apt install wmctrl      # or dnf / pacman -S / zypper install — the
+                             # package is called wmctrl everywhere, and
+                             # install.sh prints the right command for you
 ```
 
 The engine uses it to count your open windows, so its Alt+Tab presses cycle a
@@ -172,8 +196,9 @@ The choice sticks, so you only do this once.
 Ubuntu 25.10 and later, and recent Fedora GNOME, ship Wayland only. There is
 then no way to make this tool work on that desktop, and the honest options are
 to run it on a machine that still offers Xorg, or to install a lighter X11
-desktop (for example `sudo apt install xfce4`, then pick Xfce at the login
-screen) alongside what you have.
+desktop alongside what you have and pick it at the login screen — Xfce is the
+usual choice (`sudo apt install xfce4`, `sudo dnf install @xfce-desktop`,
+`sudo pacman -S xfce4`, `sudo zypper install -t pattern xfce`).
 
 **We looked at `ydotool` and decided against it** — see
 [knowledge/lessons.md](knowledge/lessons.md) for the reasoning. The short
@@ -275,6 +300,8 @@ emulation-engine/
 ├── engine/test_metrics.py   offline cadence simulator (make test)
 ├── console/index.html       the control page the engine serves at /
 ├── install.sh  run.sh       macOS and Linux
+├── packages.sh              which package manager this Linux box uses, and the
+│                            package names for it (sourced by install.sh)
 ├── install.ps1  run.ps1     Windows
 ├── Makefile  requirements.txt
 └── knowledge/               intro, architecture, lessons, cheatsheet
@@ -303,8 +330,11 @@ input it says so in red on the console and refuses to start. So:
   confirm the X server is accepting synthetic input at all:
   `xdotool mousemove 500 500` should jump your pointer. If that does nothing
   either, the problem is below this tool.
-- **`install.sh` fails** — it prints one `sudo apt install ...` line with
-  everything that is missing. Run it and re-run `./install.sh`.
+- **`install.sh` fails** — it prints one install command for your own
+  distribution (`apt`, `dnf`, `pacman` or `zypper`) with everything that is
+  missing. Run it and re-run `./install.sh`. If it says your package manager was
+  not recognised, it lists the requirements in words instead — install those
+  however your distribution does it.
 - **`./install.sh: Permission denied`** — the executable bit was lost, which
   happens when the folder arrives as a zip downloaded from a browser. Fix with
   `chmod +x install.sh run.sh`, or run `bash install.sh` instead.
