@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { Router } from 'express';
 import { ConfigSchema, RecipientSchema, type JobKind } from '../config/schema.js';
 import { getConfig, getDismissals, getRuns, removeDismissal, setConfig, syncUndoMessage } from '../config/store.js';
@@ -10,11 +11,14 @@ import type { Scheduler } from '../scheduler/index.js';
 import { SlackClient } from '../slack/client.js';
 import { restoreRow } from '../slack/socket.js';
 import { buildRangeReport, windowFor, type RangeReport } from '../report.js';
+import { Keeper } from '../keeper/index.js';
 
 export interface RouterDeps {
   teamworkToken: string;
   slackToken: string;
   scheduler: Scheduler;
+  /** Tests pass one with a fake fetch; the server lets the router make its own. */
+  keeper?: Keeper;
 }
 
 /**
@@ -299,6 +303,59 @@ export function buildRouter(deps: RouterDeps): Router {
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
+  });
+
+  // --- keep dev/QA instances awake -------------------------------------------------------
+  // Lives with the router rather than the server entry point so it starts with the API
+  // and stops with the process; there is nothing to flush on shutdown.
+  const keeper = deps.keeper ?? new Keeper();
+  keeper.start();
+  const keepAliveOf = () => {
+    const { pingMinutes, hours, activityPath } = getConfig().keepAlive;
+    return { instances: keeper.views(), pingMinutes, hours, activityPath };
+  };
+
+  router.get('/keeper', (_req, res) => res.json(keepAliveOf()));
+
+  router.put('/keeper', (req, res) => {
+    const parsed = z.object({ pingMinutes: z.number().int().min(1).max(15).optional(), hours: z.number().min(0.5).max(24).optional(), activityPath: z.string().regex(/^\//, 'must start with /').optional() })
+      .safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: 'invalid settings', issues: parsed.error.issues }); return; }
+    setConfig({ keepAlive: { ...getConfig().keepAlive, ...parsed.data } });
+    res.json(keepAliveOf());
+  });
+
+  router.post('/keeper/instances', (req, res) => {
+    const parsed = z.object({ url: z.string().url(), label: z.string().default('') }).safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: 'enter a full URL, starting with https://' }); return; }
+    keeper.add(parsed.data.url, parsed.data.label);
+    res.json(keepAliveOf());
+  });
+
+  router.delete('/keeper/instances/:id', (req, res) => {
+    keeper.remove(req.params.id);
+    res.json(keepAliveOf());
+  });
+
+  // Start = keep it awake from now, and look at it immediately (which presses the
+  // server's Start if it is down). The response waits for that first look.
+  router.post('/keeper/instances/:id/start', async (req, res) => {
+    const hours = typeof req.body?.hours === 'number' ? req.body.hours : undefined;
+    const view = await keeper.keep(req.params.id, hours);
+    if (!view) { res.status(404).json({ error: 'no such instance' }); return; }
+    res.json({ instance: view, ...keepAliveOf() });
+  });
+
+  router.post('/keeper/instances/:id/stop', (req, res) => {
+    const view = keeper.release(req.params.id);
+    if (!view) { res.status(404).json({ error: 'no such instance' }); return; }
+    res.json({ instance: view, ...keepAliveOf() });
+  });
+
+  router.post('/keeper/instances/:id/check', async (req, res) => {
+    const view = await keeper.ping(req.params.id);
+    if (!view) { res.status(404).json({ error: 'no such instance' }); return; }
+    res.json({ instance: view, ...keepAliveOf() });
   });
 
   return router;
