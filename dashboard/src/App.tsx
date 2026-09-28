@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { Config, DismissalRow, Job, JobKind, PersonSuggestion, Preview, Recipient, ReportJob, RuleInfo, Status } from './types.js';
+import { AutomationPanel } from './components/AutomationPanel';
 import { KeepAlivePanel } from './components/KeepAlivePanel.js';
 
 const DAYS = [
@@ -221,6 +222,10 @@ export default function App() {
       </section>
 
       <KeepAlivePanel />
+
+      <div style={{ marginBottom: 16 }}>
+        <AutomationPanel />
+      </div>
 
       <section className="card">
         <h2>Schedule</h2>

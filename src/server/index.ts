@@ -9,6 +9,7 @@ import { basicAuth } from './auth.js';
 import { SlackSocket } from '../slack/socket.js';
 import { UndoSweeper } from '../slack/undo-sweeper.js';
 import { buildRouter } from './routes.js';
+import bridgeRouter from './bridge-controller.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 // Render and most PaaS hosts inject PORT; 4310 is the local default.
@@ -43,6 +44,8 @@ const scheduler = new Scheduler({ teamworkToken, slackToken });
 const socket = slackAppToken ? new SlackSocket(slackAppToken, slackToken, teamworkToken) : null;
 const undoSweeper = slackToken ? new UndoSweeper(slackToken) : null;
 app.use('/api', buildRouter({ teamworkToken, slackToken, scheduler }));
+app.use('/api', bridgeRouter);
+app.use(bridgeRouter);
 
 const dashboardDist = resolve(here, '../../dashboard/dist');
 if (existsSync(dashboardDist)) {
