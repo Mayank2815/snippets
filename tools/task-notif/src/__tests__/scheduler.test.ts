@@ -141,3 +141,29 @@ test('yesterday\'s successful send does not satisfy today', () => {
   const yesterday = at('2026-09-02T09:00').toISO()!;
   assert.equal(shouldCatchUp(live, liveJob, at('2026-09-03T11:00'), yesterday), true);
 });
+
+// --- a timer that fires late must not resend a slot the catch-up poll already sent -----
+// On 2026-09-28 the Mac slept 38 minutes in the evening; the 21:00 digest timer fired at
+// 21:37, after the catch-up poll had sent the digest at 21:06, and everyone got it twice.
+
+import { TIMER_TICK_MS, slotAlreadyDelivered, timerDelayMs } from '../scheduler/index.js';
+
+test('a slot already sent by catch-up is not sent again by the late timer', () => {
+  const slot = at('2026-09-28T21:00');
+  assert.equal(slotAlreadyDelivered(slot, '2026-09-28T15:38:23.020Z'), true); // 21:08 IST, by catch-up
+});
+
+test('a run from before the slot does not satisfy it', () => {
+  const slot = at('2026-09-28T21:00');
+  assert.equal(slotAlreadyDelivered(slot, '2026-09-27T15:38:00.000Z'), false); // yesterday's digest
+  assert.equal(slotAlreadyDelivered(slot, null), false);
+});
+
+test('the timer re-arms every minute instead of sleeping until the slot', () => {
+  const now = at('2026-09-28T12:29');
+  const slot = at('2026-09-28T21:00'); // 511 minutes away, as on the day it went wrong
+  assert.equal(timerDelayMs(slot, now), TIMER_TICK_MS);
+  // Close to the slot it waits exactly the remaining time, never past it.
+  assert.equal(timerDelayMs(slot, at('2026-09-28T20:59:30')), 30_000);
+  assert.equal(timerDelayMs(slot, at('2026-09-28T21:05')), 0);
+});
