@@ -71,7 +71,10 @@
   </section>
   <section class="panel" role="tabpanel" data-panel="emulation-engine">
     <div class="notice" id="engine-notice">
-      <h2>The emulation engine is not running on this Mac</h2>
+      <h2 id="engine-notice-title">The emulation engine is not running on this Mac</h2>
+      <p id="engine-notice-outdated" style="display:none"><strong>An older engine is running on port 4320</strong> that
+         answers status calls but has no console page. Stop it (<code>kill $(lsof -t -nP -iTCP:4320 -sTCP:LISTEN)</code>)
+         and start the current one with the command below.</p>
       <p>The engine drives the mouse and keyboard of the machine it runs on, so it always runs
          locally and this page only talks to it at <code>127.0.0.1:4320</code>.</p>
       <p>Start it from a terminal in the repo:</p>
@@ -87,6 +90,13 @@
 (function () {
   // The engine lives on the viewer's Mac, never on the server: see the notice text.
   var ENGINE = 'http://127.0.0.1:4320';
+  // ?engine=http://127.0.0.1:4325 points the tab at an engine on another port, for testing
+  // a second copy without stopping the one people use.
+  try {
+    var override = new URLSearchParams(location.search).get('engine');
+    if (override && /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(override)) ENGINE = override;
+  } catch (e) { /* very old browser; keep the default */ }
+  document.querySelector('[data-panel=emulation-engine] iframe').dataset.src = ENGINE + '/';
   // Two seconds matches the console page's own polling, and is slow enough that a
   // stopped engine does not spam the browser console with failed requests.
   var ENGINE_POLL_MS = 2000;
@@ -119,21 +129,33 @@
   function checkEngine() {
     var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
     var timer = ctrl && setTimeout(function () { ctrl.abort(); }, 1500);
+    var outdated = document.getElementById('engine-notice-outdated');
+    var title = document.getElementById('engine-notice-title');
+    function showNotice(isOutdated) {
+      title.textContent = isOutdated ? 'The engine on this Mac is an older version' : 'The emulation engine is not running on this Mac';
+      outdated.style.display = isOutdated ? '' : 'none';
+      notice.style.display = '';
+      engineFrame.style.display = 'none';
+      engineFrame.removeAttribute('src');
+    }
     fetch(ENGINE + '/status', { mode: 'cors', signal: ctrl && ctrl.signal })
       .then(function (r) { return r.json(); })
       .then(function (s) {
         var running = String(s.status || '').toUpperCase() === 'RUNNING';
         dot.className = 'dot ' + (running ? 'ok' : 'warn');
         text.textContent = 'Engine: ' + (running ? 'running' : 'idle') + ' on this Mac';
-        notice.style.display = 'none';
-        if (engineFrame.style.display === 'none') { engineFrame.style.display = ''; engineFrame.src = engineFrame.dataset.src; }
+        // An engine from before the console existed answers /status but not /. Loading it
+        // into the frame would show a browser error page with no explanation.
+        return fetch(ENGINE + '/', { mode: 'cors', signal: ctrl && ctrl.signal }).then(function (r) {
+          if (!r.ok) throw new Error('outdated');
+          notice.style.display = 'none';
+          if (engineFrame.style.display === 'none') { engineFrame.style.display = ''; engineFrame.src = engineFrame.dataset.src; }
+        }, function () { showNotice(true); });
       })
       .catch(function () {
         dot.className = 'dot bad';
         text.textContent = 'Engine: not running on this Mac';
-        notice.style.display = '';
-        engineFrame.style.display = 'none';
-        engineFrame.removeAttribute('src');
+        showNotice(false);
       })
       .then(function () { if (timer) clearTimeout(timer); });
   }
