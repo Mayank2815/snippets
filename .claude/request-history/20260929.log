@@ -1,0 +1,3 @@
+14:59 [DONE] Engine now runs on Windows and Linux too (PR #13, pynput backend); Mac path unchanged, verified; workbench + engine restarted on the new code
+15:47 [DONE] Linux hardened (PR #14): 5 fresh-machine breakages fixed (curl/lsof missing, evdev compile, ensurepip, double-SIGTERM) and Wayland now refuses loudly instead of silently doing nothing
+16:49 [DONE] Linux distro + arch coverage (PR #15): install.sh now prints the right command on apt/dnf/pacman/zypper; pointer proven moving on Ubuntu, Debian, Fedora, Arch, openSUSE across x86_64 and aarch64; 70 tests

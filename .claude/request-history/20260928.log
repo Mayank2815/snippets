@@ -1,2 +1,6 @@
 00:16 [LOGGED] Plan restructure of task_notif into a multi-tool 'snippets' repo (folder per tool: task notif, keep alive, Core Emulation Engine Control Console; knowledge per tool)
 00:38 [LOGGED] Lead approved: rename repo to snippets, Option B + single workbench dashboard (nginx proxy), engine runnable on other Macs (Rohit has repo access), land keep-alive and emulation-engine as two separate commits first
+03:00 [DONE] Restructure complete (PRs #1-#10 merged); local stack switched to Docker with real data, launchd agent removed, new engine running
+12:10 [LOGGED] Make emulation-engine cross-platform (Windows + Linux via pynput backend, Mac keeps Quartz); user: 'Haa ye kr do properly and lmk once done'
+12:14 [LOGGED] BUG: evening digest sent twice today (9:08 PM and 9:39 PM IST); user asks why and whether Mayank/Priyanshika were affected differently. User words: 'ye Your day wala message slack reminder ka do baar kyu aaya h 9:08pm ar 9:39pm pe, esa kyu ar Mayank ar Priyanshika pe toh aaya hi hai, kyu h esa check krao'
+12:19 [DONE] Duplicate digest fixed (PR #11): late timer after machine sleep now skips a slot the catch-up poll already sent; container rebuilt and running
