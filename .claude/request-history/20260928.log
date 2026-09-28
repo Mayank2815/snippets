@@ -1,0 +1,2 @@
+00:16 [LOGGED] Plan restructure of task_notif into a multi-tool 'snippets' repo (folder per tool: task notif, keep alive, Core Emulation Engine Control Console; knowledge per tool)
+00:38 [LOGGED] Lead approved: rename repo to snippets, Option B + single workbench dashboard (nginx proxy), engine runnable on other Macs (Rohit has repo access), land keep-alive and emulation-engine as two separate commits first

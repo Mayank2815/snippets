@@ -11,3 +11,6 @@
 *.sqlite
 *.sqlite-journal
 .DS_Store
+
+# Agent worktrees are created here by Claude Code sessions; never part of the repo.
+.claude/worktrees/
