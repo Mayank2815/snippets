@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snippets Workbench</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0e1116; --panel: #161b22; --panel-2: #1c2330; --border: #2a3140;
+    --text: #e6edf3; --muted: #8b98a9; --accent: #4c8dff; --ok: #3fb950; --warn: #d29922; --err: #f85149;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 18px; padding: 10px 16px;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 15px; margin: 0 8px 0 0; letter-spacing: -0.01em; white-space: nowrap; }
+  nav { display: flex; gap: 6px; flex-wrap: wrap; }
+  nav button {
+    background: var(--panel-2); color: var(--muted); border: 1px solid var(--border);
+    border-radius: 8px; padding: 7px 14px; font: inherit; cursor: pointer;
+  }
+  nav button[aria-selected="true"] { color: var(--text); border-color: var(--accent); background: #1a2740; }
+  nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .spacer { flex: 1; }
+  .engine-state { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--err); }
+  main { flex: 1; position: relative; min-height: 0; }
+  iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--bg); }
+  .panel { position: absolute; inset: 0; display: none; }
+  .panel[data-active="true"] { display: block; }
+  .notice {
+    max-width: 640px; margin: 48px auto; padding: 24px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  }
+  .notice h2 { font-size: 16px; margin: 0 0 10px; }
+  .notice p { margin: 0 0 10px; color: var(--muted); }
+  .notice code { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 2px 6px; color: var(--text); }
+  .notice button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; font: inherit; cursor: pointer; margin-top: 6px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Snippets</h1>
+  <nav role="tablist" aria-label="Tools">
+    <button role="tab" data-tab="task-notif">Task Notif</button>
+    <button role="tab" data-tab="keep-alive">Keep Alive</button>
+    <button role="tab" data-tab="emulation-engine">Emulation Engine</button>
+  </nav>
+  <div class="spacer"></div>
+  <div class="engine-state" id="engine-state" title="The emulation engine runs on your own Mac, not on the server">
+    <span class="dot" id="engine-dot"></span><span id="engine-text">Engine: checking…</span>
+  </div>
+</header>
+<main>
+  <section class="panel" role="tabpanel" data-panel="task-notif">
+    <iframe title="Task Notif" data-src="/task-notif/"></iframe>
+  </section>
+  <section class="panel" role="tabpanel" data-panel="keep-alive">
+    <iframe title="Keep Alive" data-src="/keep-alive/"></iframe>
+  </section>
+  <section class="panel" role="tabpanel" data-panel="emulation-engine">
+    <div class="notice" id="engine-notice">
+      <h2>The emulation engine is not running on this Mac</h2>
+      <p>The engine drives the mouse and keyboard of the machine it runs on, so it always runs
+         locally and this page only talks to it at <code>127.0.0.1:4320</code>.</p>
+      <p>Start it from a terminal in the repo:</p>
+      <p><code>cd tools/emulation-engine &amp;&amp; ./run.sh --no-open</code></p>
+      <p>First time on this Mac: run <code>./install.sh</code> once before that. The README in that
+         folder explains the Accessibility permission macOS will ask for.</p>
+      <button id="engine-retry">Check again</button>
+    </div>
+    <iframe title="Core Emulation Engine Control Console" data-src="http://127.0.0.1:4320/" style="display:none"></iframe>
+  </section>
+</main>
+<script>
+(function () {
+  // The engine lives on the viewer's Mac, never on the server: see the notice text.
+  var ENGINE = 'http://127.0.0.1:4320';
+  // Two seconds matches the console page's own polling, and is slow enough that a
+  // stopped engine does not spam the browser console with failed requests.
+  var ENGINE_POLL_MS = 2000;
+
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('[role=tab]'));
+  var panels = Array.prototype.slice.call(document.querySelectorAll('[role=tabpanel]'));
+
+  function show(name) {
+    tabs.forEach(function (t) { t.setAttribute('aria-selected', String(t.dataset.tab === name)); });
+    panels.forEach(function (p) {
+      var active = p.dataset.panel === name;
+      p.dataset.active = String(active);
+      // Frames load on first visit only, so opening the page does not hit every tool at once.
+      if (active) p.querySelectorAll('iframe[data-src]').forEach(function (f) {
+        if (!f.src && f.style.display !== 'none') { f.src = f.dataset.src; }
+      });
+    });
+    try { localStorage.setItem('snippets.tab', name); } catch (e) { /* private window or blocked storage */ }
+    if (name === 'emulation-engine') checkEngine();
+  }
+
+  tabs.forEach(function (t) { t.addEventListener('click', function () { show(t.dataset.tab); }); });
+
+  var dot = document.getElementById('engine-dot');
+  var text = document.getElementById('engine-text');
+  var notice = document.getElementById('engine-notice');
+  var engineFrame = document.querySelector('[data-panel=emulation-engine] iframe');
+  document.getElementById('engine-retry').addEventListener('click', checkEngine);
+
+  function checkEngine() {
+    var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = ctrl && setTimeout(function () { ctrl.abort(); }, 1500);
+    fetch(ENGINE + '/status', { mode: 'cors', signal: ctrl && ctrl.signal })
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        var running = String(s.status || '').toUpperCase() === 'RUNNING';
+        dot.className = 'dot ' + (running ? 'ok' : 'warn');
+        text.textContent = 'Engine: ' + (running ? 'running' : 'idle') + ' on this Mac';
+        notice.style.display = 'none';
+        if (engineFrame.style.display === 'none') { engineFrame.style.display = ''; engineFrame.src = engineFrame.dataset.src; }
+      })
+      .catch(function () {
+        dot.className = 'dot bad';
+        text.textContent = 'Engine: not running on this Mac';
+        notice.style.display = '';
+        engineFrame.style.display = 'none';
+        engineFrame.removeAttribute('src');
+      })
+      .then(function () { if (timer) clearTimeout(timer); });
+  }
+
+  var initial = 'task-notif';
+  try { initial = localStorage.getItem('snippets.tab') || initial; } catch (e) { /* ignore */ }
+  if (!tabs.some(function (t) { return t.dataset.tab === initial; })) initial = 'task-notif';
+  show(initial);
+  checkEngine();
+  setInterval(checkEngine, ENGINE_POLL_MS);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+# Standalone run of the workbench only. It expects task-notif and keep-alive to be
+# reachable by those names on the same Docker network, which is what deploy/docker-compose.yml
+# at the repo root sets up; use that file on the VM.
+services:
+  workbench:
+    build: .
+    image: snippets-workbench:latest
+    container_name: snippets-workbench
+    restart: unless-stopped
+    ports:
+      # Loopback only: the tools behind it have at most basic auth. Open it with an SSH tunnel.
+      - "127.0.0.1:4300:80"

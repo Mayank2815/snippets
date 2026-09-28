@@ -1,0 +1,52 @@
+# The whole VM stack: every tool that lives on the always-on host, plus the workbench
+# that fronts them. Run from this folder:  docker compose up -d --build
+#
+# Each tool also has its own docker-compose.yml for running it alone; this file exists
+# so the workbench's nginx can reach the tools by name on one network, and so one
+# command restarts everything after a deploy.
+services:
+  task-notif:
+    build: ../tools/task-notif
+    image: task-notif:latest
+    container_name: task-notif
+    restart: unless-stopped
+    env_file: ../tools/task-notif/.env
+    environment:
+      # Luxon computes the reminder times from the configured timezone, so the
+      # container clock only needs to be correct, not local.
+      TZ: UTC
+    volumes:
+      - ../tools/task-notif/data:/app/data
+    ports:
+      # Still exposed on loopback so the tool works on its own port too.
+      - "127.0.0.1:4310:4310"
+
+  keep-alive:
+    build: ../tools/keep-alive
+    image: keep-alive:latest
+    container_name: keep-alive
+    restart: unless-stopped
+    env_file: ../tools/keep-alive/.env
+    environment:
+      TZ: UTC
+      # Keep Alive used to live inside task-notif and stored its instances in that
+      # tool's store.json. On first boot with an empty store it copies them from here.
+      LEGACY_TASK_NOTIF_STORE: /legacy/store.json
+    volumes:
+      - ../tools/keep-alive/data:/app/data
+      - ../tools/task-notif/data:/legacy:ro
+    ports:
+      - "127.0.0.1:4311:4311"
+
+  workbench:
+    build: ../tools/workbench
+    image: snippets-workbench:latest
+    container_name: snippets-workbench
+    restart: unless-stopped
+    depends_on:
+      - task-notif
+      - keep-alive
+    ports:
+      # Loopback only: the tools behind it have at most basic auth. Open it with
+      #   ssh -N -L 4300:127.0.0.1:4300 user@host   then   http://localhost:4300
+      - "127.0.0.1:4300:80"
