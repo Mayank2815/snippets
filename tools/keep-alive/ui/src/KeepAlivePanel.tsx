@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type FocusEvent, type KeyboardEvent } from 'react';
 import type { KeepAliveSettings, KeptInstanceView } from './types.js';
 
 /**
@@ -59,6 +59,22 @@ export function KeepAlivePanel() {
   const settings = (p: Partial<KeepAliveSettings>) =>
     act('settings', () => call('', { method: 'PUT', body: JSON.stringify(p) }));
 
+  /**
+   * The number fields save on blur (or Enter), like the activity path does — not on every
+   * keystroke, where typing "12" first saved 1 and clearing the field saved 0 and showed
+   * the server's validation error. An emptied field is put back to the saved value.
+   */
+  const numberField = (key: 'pingMinutes' | 'hours', current: number) => ({
+    key: `${key}-${current}`, // remount when a refresh brings a new saved value, so the field shows it
+    defaultValue: current,
+    onKeyDown: (e: KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') e.currentTarget.blur(); },
+    onBlur: (e: FocusEvent<HTMLInputElement>) => {
+      const next = Number(e.target.value);
+      if (e.target.value.trim() === '' || Number.isNaN(next)) { e.target.value = String(current); return; }
+      if (next !== current) void settings({ [key]: next });
+    },
+  });
+
   return (
     <section className="card">
       <h2>Keep instances awake</h2>
@@ -116,12 +132,10 @@ export function KeepAlivePanel() {
       {data && (
         <div className="grid" style={{ marginTop: 16 }}>
           <label className="field">Ping every (minutes)
-            <input type="number" min={1} max={15} value={data.pingMinutes}
-              onChange={(e) => void settings({ pingMinutes: Number(e.target.value) })} />
+            <input type="number" min={1} max={15} {...numberField('pingMinutes', data.pingMinutes)} />
           </label>
           <label className="field">Keep for (hours per Start)
-            <input type="number" min={0.5} max={24} step={0.5} value={data.hours}
-              onChange={(e) => void settings({ hours: Number(e.target.value) })} />
+            <input type="number" min={0.5} max={24} step={0.5} {...numberField('hours', data.hours)} />
           </label>
           <label className="field" style={{ gridColumn: 'span 2' }}>Activity path (the page itself is cached by CloudFront, so each ping also fetches this from the server)
             <input value={data.activityPath} placeholder="/rest/api/users/isMySessionActive"

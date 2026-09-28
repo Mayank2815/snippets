@@ -3,13 +3,37 @@
 Dated notes on things that went wrong or were non-obvious, pulled from the code's own
 comments and the history it came with. Newest first.
 
+## 2026-09-28 — review findings on the extraction
+
+- **`hours` was taken off the request body unchecked.** `{"hours":1e999}` parses to
+  `Infinity`, `new Date(now + Infinity).toISOString()` throws, and Express 4 does not catch
+  a rejection from an async handler — the whole process died on one request. The Start body
+  now goes through `KeepAliveSchema.shape.hours`, the same as the settings PUT, so it is a
+  400 instead. Every number off the wire goes through the schema; there is no "it is just a
+  number" exception.
+- **Anyone who can add an instance can make the keeper send requests.** The keeper fetches
+  the URL it is given and `POST`s to whatever `API_BASE` it scrapes from the maintenance
+  page it finds. `file:///etc/passwd` passed `z.string().url()`, gave an empty slug and a
+  500 with a ZodError body. Now only `http(s)` can be added, and a scraped API base that is
+  not `http(s)` is dropped. That is as far as the code can go — the management API really is
+  on a different host from the instance — so the loopback bind and `DASHBOARD_PASSWORD`
+  are the real boundary (README, "Security").
+- **The legacy import guard was "the list is empty".** Delete every instance, restart with
+  `LEGACY_TASK_NOTIF_STORE` still set (the deploy stack leaves it set), and the rows came
+  back. The guard is now `importedAt` in `keep-alive.json`. The import also used to write
+  the whole legacy block, overwriting settings tuned here; it now merges instances only.
+
 ## 2026-09-28 — extraction from task-notif
 
-- **The store moved.** The kept list used to be `config.keepAlive` inside task-notif's
-  `store.json`; it is now `keep-alive.json` in this service's own `DATA_DIR`. task-notif's
-  config schema is a plain zod object, so a `store.json` that still carries the old key is
-  simply ignored — no migration on that side, nothing breaks. The one-off import
-  (`LEGACY_TASK_NOTIF_STORE`) is how the list comes across; it only reads.
+- **The store moved, and the old copy is erased on task-notif's next write.** The kept
+  list used to be `config.keepAlive` inside task-notif's `store.json`; it is now
+  `keep-alive.json` in this service's own `DATA_DIR`. This was first written up as "the new
+  task-notif simply ignores the old key, nothing breaks". That is wrong in the way that
+  matters: task-notif parses through a zod schema that strips unknown keys, and every write
+  path — `setConfig`, `recordRun` on each scheduled send, the dismissals — persists the
+  stripped object. The block is gone within hours of the new task-notif starting, so the
+  snapshot for the import (`LEGACY_TASK_NOTIF_STORE`) has to be taken **before** task-notif
+  is redeployed. `deploy/deploy.sh` does that; a by-hand deploy has to remember to.
 - **Settings patches must not carry `undefined`.** `setKeepAlive({ ...stored, ...patch })`
   followed by a schema parse would let an explicit `undefined` in the patch shadow the
   stored value and hand the field back to its default. The store strips undefined keys
@@ -17,7 +41,10 @@ comments and the history it came with. Newest first.
   was already safe; the store guards it anyway.)
 - **Relative URLs everywhere in the UI.** So the page can be served behind a reverse-proxy
   prefix such as `/keep-alive/`: Vite `base: './'`, and fetches are `api/keeper…`, never
-  `/api/keeper…`. The prefix must end in a slash for the relative resolution to work.
+  `/api/keeper…`. The prefix must end in a slash, and the failure when it does not is a
+  blank page: at `/keep-alive` (no slash) the browser resolves `./assets/…` and
+  `api/keeper` against `/`, outside the prefix, so the bundle 404s and nothing renders. The
+  workbench proxy redirects `/keep-alive` to `/keep-alive/` for that reason.
 - **Ports.** task-notif is 4310 (dev UI 5310); this is 4311 (dev UI 5311). Same VM,
   next free port.
 - **Tests set `DATA_DIR` before importing the store.** The store resolves its directory

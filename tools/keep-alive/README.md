@@ -37,8 +37,13 @@ cd tools/keep-alive
 npm install
 npm --prefix ui install
 cp .env.example .env         # nothing in it is required locally
-npm run dev                  # API on http://localhost:4311
-npm --prefix ui run dev      # UI on http://localhost:5311, proxying /api to 4311
+```
+
+Then, in two terminals:
+
+```bash
+npm run dev                  # terminal 1: API on http://localhost:4311
+npm --prefix ui run dev      # terminal 2: UI on http://localhost:5311, proxying /api to 4311
 ```
 
 In development the UI is served by Vite on 5311. In production `npm run build` compiles
@@ -76,10 +81,26 @@ The port is bound to loopback on the host on purpose. There is no login unless
 not be reachable from the internet — reach it over the SSH tunnel above, or put it behind
 a reverse proxy that handles authentication.
 
+### Security
+
+Whoever can reach the dashboard can make this service send requests on their behalf. Adding
+an instance makes the keeper fetch that URL from wherever the service runs, so an attacker
+could point it at hosts only the VM can see; and when a fetched page looks like the
+maintenance wrapper, the keeper reads a management API address out of it and `POST`s to
+that. The service limits the damage — only `http(s)` URLs can be added, and a scraped API
+address that is not `http(s)` is ignored — but it cannot tell an internal host from an
+external one, because the real management API legitimately lives on a different host from
+the instance. The protection is therefore who can reach the port: keep it on loopback (the
+compose files do), and set `DASHBOARD_PASSWORD` the moment it is exposed any further than an
+SSH tunnel.
+
 **Behind a path prefix.** The built page uses relative URLs throughout (`base: './'` in
 Vite, and every API call is `api/keeper…`, not `/api/keeper…`), so a reverse proxy can serve
 it under a prefix such as `/keep-alive/` as long as the prefix ends in a slash and the proxy
-strips it before forwarding.
+strips it before forwarding. The slash is not optional: opened at `/keep-alive` without it,
+the browser resolves `api/keeper` and `./assets/…` against `/`, outside the prefix, so the
+scripts do not load and the page renders blank. The workbench's proxy redirects
+`/keep-alive` to `/keep-alive/` for exactly that reason; do the same in any other proxy.
 
 **Volume ownership.** A mounted volume arrives with the host's ownership, which overrides
 whatever the image chowned at build time — so a container running as a non-root user cannot
@@ -89,33 +110,42 @@ data directory, then `su-exec`s to `node`. The app itself never runs as root.
 ### Bringing the kept list over from task-notif
 
 Until 28 September 2026 the list lived inside task-notif's `store.json`, under a `keepAlive`
-key. task-notif ignores that key now (its schema no longer knows it), and this service can
-copy it out once so nobody has to re-add every instance by hand.
+key. This service can copy it out once so nobody has to re-add every instance by hand — but
+the copy has to come from a **snapshot taken before the new task-notif runs**. task-notif
+parses its store through a zod schema that strips keys it does not know, and every one of
+its write paths (including the run it records on each scheduled send) persists the stripped
+object. So the `keepAlive` block is gone from the live `store.json` on task-notif's next
+write, within hours of deploying it, and there is nothing left to import.
 
-On the first boot only:
+**The supported path is the repo's deploy stack.** `deploy/deploy.sh` copies
+`tools/task-notif/data/store.json` to `tools/keep-alive/data/legacy-task-notif-store.json`
+before it restarts anything (only when there is no `keep-alive.json` yet, so a re-deploy
+never overwrites a snapshot), and `deploy/docker-compose.yml` sets
+`LEGACY_TASK_NOTIF_STORE=/app/data/legacy-task-notif-store.json`. On the first boot the log
+shows `[store] imported N instance(s) from /app/data/legacy-task-notif-store.json`; on every
+later boot the variable is still set and does nothing.
 
-1. In `docker-compose.yml`, uncomment the read-only mount of task-notif's data directory
-   (`../task-notif/data:/legacy:ro`).
-2. In `.env`, set `LEGACY_TASK_NOTIF_STORE=/legacy/store.json`.
-3. `docker compose up -d --build`, then `docker compose logs` — you should see
-   `[store] imported N instance(s) and settings from /legacy/store.json`.
-4. Remove the mount and the variable again. They are harmless if left (the import only
-   runs while this service's own list is empty), but there is no reason to keep task-notif's
-   data mounted here.
+What the import does and does not do:
 
-Outside Docker it is the same variable pointing at the file directly, e.g.
-`LEGACY_TASK_NOTIF_STORE=../task-notif/data/store.json npm start`.
+- It copies **only the instances**. The three settings stay whatever this service already
+  has, so a `pingMinutes` or `activityPath` you tuned here is not overwritten. A row that is
+  already here wins over the legacy copy with the same id.
+- It runs **once**, recorded as `importedAt` in `keep-alive.json`. It is not "runs while the
+  list is empty": deleting every instance and restarting does not bring them back.
+- It only reads the snapshot. It never modifies it, or task-notif's file.
 
-The import only reads task-notif's file. It never modifies it.
+By hand, outside the deploy stack, it is the same variable pointing at a copy you took
+yourself: `cp ../task-notif/data/store.json data/legacy-task-notif-store.json` **before**
+starting the new task-notif, then `LEGACY_TASK_NOTIF_STORE=./data/legacy-task-notif-store.json npm start`.
 
 ## Environment variables
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `4311` | HTTP port. 4310 is task-notif's, so this is the next one along. |
-| `DATA_DIR` | `./data` | Where `keep-alive.json` lives. `/app/data` in the container, mounted as a volume. |
+| `DATA_DIR` | `./data` | Where `keep-alive.json` lives. Relative to the working directory — `/app` in the container, so `./data` is `/app/data`, the mounted volume. |
 | `DASHBOARD_PASSWORD` | unset | When set, HTTP Basic auth on everything except `/healthz`. Required on any host where the port is public. |
-| `LEGACY_TASK_NOTIF_STORE` | unset | Path to task-notif's `store.json` for the one-off import above. |
+| `LEGACY_TASK_NOTIF_STORE` | unset | Path to a snapshot of task-notif's `store.json` for the one-off import above. The deploy stack sets it. |
 
 ## API
 
@@ -125,11 +155,14 @@ All under `/api`; the page is the only client, but nothing stops a script.
 |---|---|---|
 | `GET` | `/api/keeper` | the list with what the last ping saw, plus the three settings |
 | `PUT` | `/api/keeper` | change any of `pingMinutes`, `hours`, `activityPath` |
-| `POST` | `/api/keeper/instances` | `{ url, label? }` — add one; the id is a slug of the host |
+| `POST` | `/api/keeper/instances` | `{ url, label? }` — add one; `http(s)` only; the id is a slug of the host |
 | `DELETE` | `/api/keeper/instances/:id` | remove one |
-| `POST` | `/api/keeper/instances/:id/start` | keep it for `hours` (body `{ hours? }`) and look at it now |
+| `POST` | `/api/keeper/instances/:id/start` | keep it for `hours` (body `{ hours? }`, 0.5–24) and look at it now |
 | `POST` | `/api/keeper/instances/:id/stop` | stop keeping it |
 | `POST` | `/api/keeper/instances/:id/check` | look at it now without changing whether it is kept |
+
+A bad body is a 400 with `{ error }`; an unknown `:id` is a 404 on every per-instance route,
+`DELETE` included; anything else under `/api` is a JSON 404 rather than the page.
 
 `GET /healthz` answers before auth, for Docker's health check.
 

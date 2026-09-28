@@ -68,6 +68,20 @@ const USER_AGENT = 'keep-alive (dev/QA instance keeper)';
 const MAINTENANCE_IFRAME = /src="(https?:\/\/[^"]*\/maintenance\/([A-Za-z0-9_-]+)\.html[^"]*)"/;
 const API_BASE_LINE = /const\s+API_BASE\s*=\s*['"]([^'"]+)['"]/;
 
+/**
+ * Only http(s) may be kept or pressed Start on. The keeper fetches whatever it is given
+ * and then POSTs to whatever API base it finds in the response, so any other scheme
+ * (file:, ftp:, gopher:) would turn it into a generic request forwarder.
+ */
+export function isHttpUrl(url: string): boolean {
+  try {
+    const { protocol } = new URL(url);
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 export function slugOf(url: string): string {
   return new URL(url).hostname.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
@@ -78,8 +92,10 @@ export function parseMaintenance(html: string): { app: string; pageUrl: string }
   return m ? { app: m[2]!, pageUrl: m[1]!.replace(/&amp;/g, '&') } : null;
 }
 
+/** The management API base out of the maintenance page's script — http(s) only, since it gets POSTed to. */
 export function parseApiBase(maintenanceHtml: string): string | null {
-  return API_BASE_LINE.exec(maintenanceHtml)?.[1] ?? null;
+  const base = API_BASE_LINE.exec(maintenanceHtml)?.[1] ?? null;
+  return base && isHttpUrl(base) ? base : null;
 }
 
 function withTimeout(init: RequestInit = {}): RequestInit {
@@ -239,6 +255,7 @@ export class Keeper {
   }
 
   add(url: string, label = ''): InstanceView[] {
+    if (!isHttpUrl(url)) throw new Error(`refusing to keep a non-http(s) URL: ${url}`);
     const clean = new URL(url).toString();
     const id = slugOf(clean);
     const { instances } = getKeepAlive();
@@ -248,8 +265,12 @@ export class Keeper {
     return this.views();
   }
 
-  remove(id: string): InstanceView[] {
-    this.save(getKeepAlive().instances.filter((i) => i.id !== id));
+  /** Takes it off the list; null if there was no such instance. */
+  remove(id: string): InstanceView[] | null {
+    const { instances } = getKeepAlive();
+    const rest = instances.filter((i) => i.id !== id);
+    if (rest.length === instances.length) return null;
+    this.save(rest);
     this.runtime.delete(id);
     return this.views();
   }

@@ -5,8 +5,8 @@
 ```bash
 cd tools/keep-alive
 npm install && npm --prefix ui install   # once
-npm run dev                              # API on 4311, reloads on change
-npm --prefix ui run dev                  # UI on 5311, proxies /api → 4311
+npm run dev                              # terminal 1: API on 4311, reloads on change
+npm --prefix ui run dev                  # terminal 2: UI on 5311, proxies /api → 4311
 npm run typecheck                        # server types
 npm test                                 # keeper + routes + store, fake instance
 npm run build                            # dist/ and ui/dist/
@@ -47,10 +47,10 @@ The id is a slug of the host: lower-case, non-alphanumerics collapsed to `-`.
 
 | | |
 |---|---|
-| kept list + settings | `${DATA_DIR:-./data}/keep-alive.json` (`/app/data` in the container, volume `./data`) |
+| kept list + settings | `${DATA_DIR:-./data}/keep-alive.json` (`/app/data` in the container, volume `./data`); `importedAt` in it records the one-off import |
 | environment | `.env` next to `docker-compose.yml` on the VM — gitignored, never committed; `.env.example` is the template |
 | credentials | only `DASHBOARD_PASSWORD`, in that `.env`. Nothing else is secret: the management API is called without credentials, the same way the maintenance page's own Start button does |
-| legacy import | `LEGACY_TASK_NOTIF_STORE=/legacy/store.json` + the commented `../task-notif/data:/legacy:ro` volume in `docker-compose.yml`, first boot only |
+| legacy import | `deploy/deploy.sh` snapshots task-notif's `store.json` to `data/legacy-task-notif-store.json` before the stack restarts; `deploy/docker-compose.yml` sets `LEGACY_TASK_NOTIF_STORE=/app/data/legacy-task-notif-store.json`. Runs once (`importedAt`), instances only. The snapshot must predate the new task-notif, which erases the block on its next write |
 
 ## Constants (in `src/keeper.ts`)
 

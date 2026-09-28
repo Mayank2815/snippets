@@ -7,10 +7,11 @@ services:
     env_file: .env
     volumes:
       - ./data:/app/data
-      # First boot only, together with LEGACY_TASK_NOTIF_STORE=/legacy/store.json in .env:
-      # copies the kept list out of task-notif's store. Read-only, so nothing in this
-      # container can touch task-notif's data. Remove both once the import has happened.
-      # - ../task-notif/data:/legacy:ro
+      # The one-off import from task-notif is handled by the repo's deploy stack
+      # (deploy/deploy.sh snapshots store.json into ./data before anything restarts, and
+      # deploy/docker-compose.yml points LEGACY_TASK_NOTIF_STORE at the snapshot). Do not
+      # mount task-notif's live data here: the new task-notif erases the keepAlive block
+      # on its next write, so reading the live file is a race you will usually lose.
     ports:
       # Bound to loopback on purpose: without DASHBOARD_PASSWORD there is no authentication,
       # so it must not be reachable from the internet. Use an SSH tunnel to open it.

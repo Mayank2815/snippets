@@ -21,6 +21,7 @@ try {
 }
 
 const app = express();
+app.disable('x-powered-by');
 app.use(express.json());
 
 // Declared before auth: a platform health check sends no credentials, and a 401
@@ -36,6 +37,7 @@ if (dashboardPassword) {
 }
 
 const keeper = new Keeper();
+// The router ends in a JSON 404, so no unmatched /api/* path reaches the SPA fallback below.
 app.use('/api', buildRouter({ keeper }));
 
 // Built by `npm run build`; absent under `npm run dev`, where Vite serves the UI on 5311 instead.
@@ -71,9 +73,16 @@ server.on('error', (err: NodeJS.ErrnoException) => {
   process.exit(1);
 });
 
+// WHY 5 s: Docker sends SIGKILL ten seconds after SIGTERM. Five seconds is enough for an
+// ordinary request to finish (a Start waiting on a slow probe is the exception, and it is
+// safe to cut short) while still leaving room to exit with a clean code before the kill.
+const SHUTDOWN_GRACE_MS = 5_000;
+
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
     keeper.stop();
-    process.exit(0);
+    // Stop accepting, let in-flight responses finish, then exit — forced after the grace period.
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), SHUTDOWN_GRACE_MS).unref();
   });
 }

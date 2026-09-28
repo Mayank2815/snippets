@@ -52,6 +52,22 @@ test('the maintenance wrapper gives away the app name, and the page its manageme
   assert.equal(parseApiBase(MAINTENANCE), 'https://server-management.qa.example.cloud');
 });
 
+test('an API base that is not http(s) is ignored, since Start would POST to it', () => {
+  // The base is scraped out of a page fetched from a URL anyone with the dashboard can add,
+  // so it is the one place a non-web scheme could be smuggled into a request the keeper makes.
+  for (const base of ['file:///etc/passwd', 'ftp://server-management.qa.example.cloud', 'gopher://x', 'not a url']) {
+    assert.equal(parseApiBase(`<script>const API_BASE = '${base}';</script>`), null, base);
+  }
+  assert.equal(parseApiBase(`<script>const API_BASE = 'http://server-management.qa.example.cloud';</script>`), 'http://server-management.qa.example.cloud');
+});
+
+test('the keeper itself refuses to add anything but http(s)', () => {
+  reset();
+  const k = new Keeper(world('running').fetchFn, () => {});
+  assert.throws(() => k.add('file:///etc/passwd'), /non-http\(s\)/);
+  assert.equal(k.views().length, 0);
+});
+
 test('a running instance is reported running, and nothing is started', async () => {
   const w = world('running');
   const p = await probeInstance(PAGE, w.fetchFn);
@@ -63,7 +79,6 @@ test('each ping also touches the server itself, since the page is a CloudFront c
   // 23 September: an instance pinged by its page alone still stopped after twenty minutes —
   // every one of those pings was answered by the edge cache and the server saw nothing.
   const w = world('running');
-  await new Keeper(w.fetchFn, () => {}).ping('nobody');
   const p = await probeInstance(PAGE, w.fetchFn, '/rest/api/users/isMySessionActive');
   assert.equal(p.state, 'running');
   assert.match(p.origin!, /HTTP 401 \(reached the server\)/);
