@@ -31,6 +31,16 @@ export const CATCHUP_POLL_MS = 15 * 60_000;
  * delays a slot by at most the nap that overlaps it, and the catch-up poll covers that.
  */
 export const TIMER_TICK_MS = 60_000;
+/**
+ * A run that starts within this much of its slot is on time. Past it the machine was
+ * asleep or busy, and the message says so — whichever path sent it.
+ */
+const ON_TIME_GRACE_MS = 2 * 60_000;
+
+/** The banner a late message carries. Both the timer and the catch-up poll use this. */
+export function lateNote(slotTime: string): string {
+  return `\u23f0 Late \u2014 this did not get through at ${slotTime}`;
+}
 
 export const JOB_KINDS: JobKind[] = ['reminder', 'digest', 'weekly'];
 
@@ -134,7 +144,7 @@ export class Scheduler {
       if (shouldCatchUp(config, config.jobs[kind], DateTime.now(), last)) {
         const slot = config.jobs[kind].time;
         this.log(`${kind}: ${slot} slot still owed — sending it now`);
-        void this.fire(kind, `⏰ Late — this did not get through at ${slot}`);
+        void this.fire(kind, lateNote(slot));
       }
     }
   }
@@ -204,7 +214,11 @@ export class Scheduler {
           this.schedule(kind);
           return;
         }
-        void this.fire(kind).finally(() => this.schedule(kind));
+        // Woken from sleep, this run is minutes late. The catch-up poll marks such a
+        // message; the timer must mark it too, or the same delay reads differently
+        // depending on which path happened to win the race on wake.
+        const late = DateTime.now().diff(next).toMillis() > ON_TIME_GRACE_MS;
+        void this.fire(kind, late ? lateNote(config.jobs[kind].time) : undefined).finally(() => this.schedule(kind));
       }, delay),
     );
   }
