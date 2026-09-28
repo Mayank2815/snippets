@@ -11,7 +11,9 @@ read its state, and the same server hands out that web page
 It runs on **macOS, Windows and Linux**. The loop, the timings and the console
 are identical everywhere; only the layer that actually posts the input differs,
 and that lives in `engine/backends/` — Quartz event taps (pyobjc) on macOS,
-pynput on Windows and Linux.
+pynput on Windows and Linux. Linux means an **X11/Xorg** session: on Wayland the
+engine refuses to start the loop and says why, rather than reporting RUNNING
+while nothing moves.
 
 It began life inside `tools/task-notif` as an "Automation panel": the Node
 server spawned the Python script and proxied `/automation/*` calls to it, and
@@ -35,8 +37,11 @@ Where things are:
 | `engine/backends/base.py`        | the contract every input backend implements              |
 | `engine/backends/quartz.py`      | macOS input (pyobjc Quartz event taps)                   |
 | `engine/backends/pynput_backend.py` | Windows and Linux input (pynput)                      |
+| `engine/backends/linux_session.py` | can this Linux session receive synthetic input?        |
+| `engine/backends/unavailable.py` | stand-in when it cannot, so the console can explain      |
 | `engine/backends/fake.py`        | records calls, generates nothing (tests, CI)             |
 | `engine/tests/test_engine.py`    | engine tests against the fake backend                    |
+| `engine/tests/test_linux_session.py` | the session check and the unavailable backend        |
 | `engine/test_metrics.py`         | offline simulator of the action cadence (no input)       |
 | `console/index.html`             | single-file control page, inline CSS/JS                  |
 | `install.sh` / `run.sh`          | venv setup and start/open/stop — macOS and Linux         |

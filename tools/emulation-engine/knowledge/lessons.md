@@ -2,6 +2,123 @@
 
 Dated, newest first. Add to this file whenever the engine bites you.
 
+## 2026-09-29 — the Wayland silent failure, and what a real Linux desktop showed
+
+The 2026-09-28 Linux support below was only ever proven inside a bare
+`python:3.12-slim` container: root, `Xvfb` started by hand, no window manager,
+no desktop packages. That is not a machine anyone uses. Re-running the
+documented path as a **non-root user on Ubuntu 22.04 and 24.04, with Openbox
+and real windows**, found the following.
+
+### The silent failure was worse than recorded — and a warning nobody reads is not a fix
+
+The previous entry says the Wayland case is handled because `install.sh` and
+the backend constructor print a warning. Measured, that was not enough in three
+distinct ways:
+
+1. **The warning does not reach the person.** `run.sh` opens the console in a
+   browser, so the terminal is behind it. `GET /status` returned
+   `{"status": "RUNNING", "backend": "pynput", "platform": "linux"}` — with
+   nothing about Wayland in it — so the console had no way to know, and showed
+   a green dot and "the pointer and keys are being driven". Measured directly.
+2. **One of the two Wayland signals was not checked at all.** The check was
+   `XDG_SESSION_TYPE == "wayland"`. A session that sets `WAYLAND_DISPLAY` and
+   leaves `XDG_SESSION_TYPE` unset or `tty` — sway and Hyprland launched from a
+   text console do exactly this — printed **no warning anywhere**.
+3. **With no `DISPLAY` at all, the error actively misled.** pynput's import
+   failed with an X-connection error, which the engine reported as
+   "pynput is not installed for this interpreter. Run ./install.sh" — sending
+   the user to reinstall a package that was already installed.
+
+**What was done.** The session check moved into `backends/linux_session.py`, a
+pure function of the environment (so every branch is unit-tested with no X
+server anywhere), and it now treats *either* Wayland signal as decisive. When
+it says no, `get_backend()` returns an `UnavailableBackend` instead of the real
+one: the server still starts, so the console — the thing the user is actually
+looking at — can explain it. `/status` gained `inputWorking` and `warning`,
+`POST /start` answers **503** with the explanation, and the console paints a red
+"INPUT UNAVAILABLE" panel with Start disabled. A false positive here is a
+visible, overridable annoyance; the opposite mistake is invisible, which is why
+the check errs towards refusing.
+
+**`ENGINE_ALLOW_WAYLAND=1`** exists for someone who genuinely only drives old
+XWayland apps. It downgrades the refusal to an amber caveat that `/status` and
+the console still show — it never downgrades it to silence.
+
+### Why not ydotool
+
+`ydotool` injects through `/dev/uinput`, below the compositor, so it does work
+on Wayland. It was rejected, for reasons that are unlikely to change:
+
+- **It cannot read the pointer position.** Wayland exposes no way to ask where
+  the cursor is, and `backend.mouse_position()` is called at the top of every
+  cycle to start the Bezier curve from where the pointer actually is. We would
+  have to track it internally and would be wrong the moment the user touched
+  their own mouse.
+- **It needs a root daemon.** `ydotoold` plus a udev rule plus group
+  membership — a much bigger ask than picking "Ubuntu on Xorg" once at the
+  login screen, which takes thirty seconds and makes the existing, tested path
+  work properly.
+- **Its own failure mode is silent.** A daemon that is not running, or a socket
+  the user cannot write to, produces exactly the "reports fine, moves nothing"
+  bug this whole entry is about. Adding it would add a second silent-failure
+  surface in exchange for a worse result.
+
+So the answer on Wayland is a clear refusal plus precise instructions. The
+README spells out the login-screen steps and is honest that Ubuntu 25.10+ and
+recent Fedora GNOME have dropped the Xorg session entirely, where the only
+options are another machine or a lighter X11 desktop.
+
+### A real desktop broke three things the slim container could not
+
+- **`run.sh` hard-failed without `curl`.** Ubuntu Desktop does not ship it. The
+  readiness loop printed `curl: command not found` twenty-seven times and then
+  `the engine did not answer on http://127.0.0.1:4320/status within 10 s` —
+  while the engine was up and perfectly healthy. An error message that names
+  the wrong thing is worse than a crash. `lsof` is missing too, which silently
+  disabled the port-in-use check. Both now fall back to `.venv/bin/python`,
+  the one interpreter guaranteed to exist by that point.
+- **The port probe must set `SO_REUSEADDR`.** The first version of that
+  fallback reported "port already in use" for about a minute after every stop,
+  with nothing listening — a socket in `TIME_WAIT`. `http.server` sets
+  `allow_reuse_address`, so the probe has to as well, or it answers a different
+  question from the one that matters.
+- **A second SIGTERM printed a traceback instead of releasing the modifier.**
+  `run.sh` traps both INT and TERM, so a Ctrl-C there can deliver two. The
+  second arrived while `shutdown_engine()` was inside
+  `backend.release_modifiers()`, and `KeyboardInterrupt` is not an `Exception`,
+  so it sailed past that method's `except Exception` and skipped the release —
+  leaving Alt held for the rest of the session, which taints every later click
+  and keystroke. `_on_sigterm` now ignores every signal after the first.
+
+### Installing needs all three apt packages, always
+
+`evdev` — pynput's Linux dependency — publishes **an sdist and no wheels for
+any architecture**, so every Linux user compiles it, not just unusual ones.
+Combined with Ubuntu splitting out `python3-venv`, a stock desktop failed
+`./install.sh` twice in a row with a different apt line each time. `install.sh`
+now checks `ensurepip`, a C compiler, `Python.h` and `linux/input.h` up front
+and prints one line:
+`sudo apt install build-essential python3-dev python3-venv`. It only insists
+on Debian/Ubuntu, where those names are right; elsewhere it names what is
+missing and carries on.
+
+### How it was proven
+
+Ubuntu 22.04 and 24.04 containers with a non-root sudo user, Openbox, two
+xterms and an xclock. Input was verified with tools that are not our code:
+`xdotool getmouselocation` sampled over time for the pointer, and
+`xinput test-xi2 --root` — which sees raw device events regardless of which
+window has focus — for keystrokes. That last detail matters: `xev -root` reports
+**zero** KeyPress events for a working engine, because XTest keys go to the
+focused window and `xev -root` only sees them when focus is on the root window.
+That looks exactly like a total failure and is not one.
+
+Measured on 24.04: 18 RawKeyPress and 19 RawMotion in one burst;
+`app_switch(2)` produced `Alt_L↓ Tab↓↑ Tab↓↑ Alt_L↑` and `browser_tab_next()`
+produced `Control_L↓ Tab↓↑ Control_L↑`, read back as keysyms from the server's
+own keymap.
+
 ## 2026-09-28 — running on Windows and Linux: the backend layer
 
 - **Why a backend layer and not a second script.** The obvious move — copy
@@ -24,6 +141,9 @@ Dated, newest first. Add to this file whenever the engine bites you.
   "[Scroll Active]" lines, nothing on screen moves. Both `install.sh` and the
   backend constructor now check `XDG_SESSION_TYPE` and print a warning, because
   nothing downstream can detect it.
+  **Superseded on 2026-09-29** — a printed warning was not enough, and one of
+  the two Wayland signals was not checked at all. See the 2026-09-29 entry
+  above; the engine now refuses to start and says so in the console.
 
 - **Do not `import pynput` to check that the install worked.** On Linux the
   import connects to the X server immediately and raises without `DISPLAY`

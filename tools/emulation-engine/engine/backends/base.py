@@ -51,6 +51,19 @@ class InputBackend:
     # the user has to grant or install for it to work.
     platform_note = ""
 
+    # WHY these three: a backend can be constructed and still be unable to
+    # deliver a single event — the Wayland case, where XTest accepts everything
+    # and the compositor drops it. engine.py reports them on GET /status and
+    # refuses POST /start while input_ok is False, so the engine can never sit
+    # in RUNNING while nothing moves. input_error/input_remedy are also set on
+    # a *usable* backend when there is a caveat worth showing (see
+    # ENGINE_ALLOW_WAYLAND), in which case input_ok stays True.
+    input_ok = True
+    # One sentence naming the problem, shown in the console.
+    input_error = None
+    # The steps that fix it, shown in the console and the terminal.
+    input_remedy = None
+
     def mouse_position(self):
         """Return the pointer position as an (x, y) tuple in screen pixels
         (points on macOS)."""

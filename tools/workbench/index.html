@@ -184,8 +184,16 @@
       .then(function (s) {
         var state = String(s.status || '').toUpperCase();
         var running = state === 'RUNNING';
-        dot.className = 'dot ' + (running ? 'ok' : 'warn');
-        text.textContent = 'Engine: ' + (running ? 'running' : state === 'STOPPING' ? 'stopping' : 'idle') + ' on this computer';
+        // inputWorking false means the engine is up but cannot deliver a single
+        // event (a Wayland session, or no X display) and refuses to start. The
+        // console inside the frame explains it in full; this pill must not say
+        // "idle", which reads as "ready, just press Start". Older engines do not
+        // send the field, and undefined must not trip this.
+        var blocked = s.inputWorking === false;
+        dot.className = 'dot ' + (blocked ? 'bad' : running ? 'ok' : 'warn');
+        text.textContent = blocked
+          ? 'Engine: cannot drive this computer — see below'
+          : 'Engine: ' + (running ? 'running' : state === 'STOPPING' ? 'stopping' : 'idle') + ' on this computer';
         if (consoleKnown || enginePanel.dataset.active !== 'true') { if (consoleKnown) showConsole(); return; }
         // An engine from before the console existed answers /status but not /. Loading it
         // into the frame would show a browser error page with no explanation.

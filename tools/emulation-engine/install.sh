@@ -48,6 +48,54 @@ if ! "$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)'
   exit 1
 fi
 
+# WHY a Linux preflight instead of discovering these one failure at a time: a
+# stock Ubuntu Desktop is missing BOTH the venv module and a C toolchain, and
+# without this the user hits two separate failures, two apt commands and three
+# runs of this script. pynput's evdev dependency publishes an sdist and no
+# wheels for any architecture, so the compiler is needed on every Linux machine,
+# not just unusual ones — it is safe to insist on it up front.
+if [[ "$OS" == "Linux" ]]; then
+  missing_pkgs=()
+  missing_why=()
+
+  if ! "$PYTHON" -c 'import ensurepip' >/dev/null 2>&1; then
+    missing_pkgs+=("python3-venv")
+    missing_why+=("python3-venv    — without it '$PYTHON -m venv' cannot create .venv")
+  fi
+  if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
+    missing_pkgs+=("build-essential")
+    missing_why+=("build-essential — a C compiler, to build pynput's evdev dependency")
+  elif [[ ! -e /usr/include/linux/input.h ]]; then
+    # linux/input.h comes from linux-libc-dev, which build-essential pulls in.
+    missing_pkgs+=("build-essential")
+    missing_why+=("build-essential — brings linux/input.h, which evdev needs to build")
+  fi
+  if ! "$PYTHON" -c 'import os, sysconfig, sys; sys.exit(0 if os.path.exists(os.path.join(sysconfig.get_paths()["include"], "Python.h")) else 1)' >/dev/null 2>&1; then
+    missing_pkgs+=("python3-dev")
+    missing_why+=("python3-dev     — Python.h, which evdev needs to build")
+  fi
+
+  if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
+    echo "install.sh: this machine is missing some system packages the install needs:" >&2
+    for line in "${missing_why[@]}"; do echo "    $line" >&2; done
+    echo >&2
+    if command -v apt >/dev/null 2>&1 || command -v apt-get >/dev/null 2>&1; then
+      # Deduplicate: build-essential can be added by either of the two checks.
+      readarray -t uniq_pkgs < <(printf '%s\n' "${missing_pkgs[@]}" | sort -u)
+      echo "install.sh: install them all in one go with:" >&2
+      echo >&2
+      echo "    sudo apt install ${uniq_pkgs[*]}" >&2
+      echo >&2
+      echo "install.sh: then re-run ./install.sh." >&2
+      exit 1
+    fi
+    # Not a Debian/Ubuntu machine: the package names above are wrong there, so
+    # say what is needed and carry on rather than block on a guess.
+    echo "install.sh: install the equivalents for your distribution, then re-run if the install below fails." >&2
+    echo >&2
+  fi
+fi
+
 if [[ -x .venv/bin/python ]]; then
   echo ".venv already exists — reusing it."
 else
@@ -116,12 +164,39 @@ Installed. One manual step remains — macOS must allow this tool to control inp
 Then start it with:  ./run.sh
 EOF
 else
-  if [[ "${XDG_SESSION_TYPE:-}" == "wayland" ]]; then
-    echo
-    echo "WARNING: this is a Wayland session. pynput can only reach XWayland windows; native Wayland"
-    echo "         apps will not see the engine's input. Log in to an X11/Xorg session (pick it on the"
-    echo "         login screen) for the engine to work."
+  # WHY ask the engine's own detector instead of re-testing XDG_SESSION_TYPE
+  # here: this script used to check that one variable, and missed the sessions
+  # that set WAYLAND_DISPLAY and leave XDG_SESSION_TYPE unset (sway and
+  # Hyprland started from a text console do exactly that) — so the user got no
+  # warning at all. One detector, one answer, in both places.
+  session_note="$(.venv/bin/python -c '
+import sys
+sys.path.insert(0, "engine")
+from backends import linux_session
+v = linux_session.check()
+print("OK" if v.ok else "BLOCKED")
+print(v.message or "")
+print(v.remedy or "")
+' 2>/dev/null || true)"
+
+  if [[ -n "$session_note" ]]; then
+    session_state="$(printf '%s\n' "$session_note" | sed -n 1p)"
+    session_message="$(printf '%s\n' "$session_note" | sed -n 2p)"
+    session_remedy="$(printf '%s\n' "$session_note" | sed -n 3p)"
+    if [[ "$session_state" == "BLOCKED" ]]; then
+      echo
+      echo "WARNING: $session_message"
+      echo
+      echo "  $session_remedy"
+      echo
+      echo "  The engine will start and serve its console, but it refuses to run the emulation"
+      echo "  loop in this state rather than report RUNNING while moving nothing."
+    elif [[ -n "$session_message" ]]; then
+      echo
+      echo "Note: $session_message"
+    fi
   fi
+
   if ! command -v wmctrl >/dev/null 2>&1; then
     echo
     echo "Note: wmctrl is not installed (optional). The engine uses it to count open windows for Alt+Tab;"
