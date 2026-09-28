@@ -30,6 +30,7 @@ os.environ["ENGINE_FAST"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import engine  # noqa: E402
+from backends.unavailable import UnavailableBackend  # noqa: E402
 
 HEADERS = {engine.CONTROL_HEADER: "1"}
 # WHY 3 s / 2 s: a fast-mode cycle is ~0.2 s, so 3 s is a generous ceiling for
@@ -38,7 +39,15 @@ CALL_WAIT_SECONDS = 3
 QUIET_SECONDS = 2
 
 
-class EngineTestCase(unittest.TestCase):
+class EngineHarness(unittest.TestCase):
+    """Server, fixtures and helpers, with no tests of its own.
+
+    WHY it is separate from EngineTestCase: the classes below swap the backend
+    for one that cannot deliver input, and inheriting the normal test methods
+    would run them all again against that backend. Each subclass gets its own
+    server on its own OS-picked port, so they cannot interfere either.
+    """
+
     @classmethod
     def setUpClass(cls):
         cls.server = HTTPServer((engine.BIND_HOST, 0), engine.EngineBridgeHandler)
@@ -100,13 +109,19 @@ class EngineTestCase(unittest.TestCase):
             time.sleep(0.02)
         return count() >= minimum
 
-    # -- tests -------------------------------------------------------------
+
+class EngineTestCase(EngineHarness):
+    """The engine on a backend that works — the normal case."""
 
     def test_status_reports_fake_backend_and_platform(self):
         payload = self.status()
         self.assertEqual(payload["status"], "IDLE")
         self.assertEqual(payload["backend"], "fake")
         self.assertEqual(payload["platform"], sys.platform)
+        # A working backend must say so explicitly, so the console can trust
+        # the field rather than inferring from its absence.
+        self.assertTrue(payload["inputWorking"])
+        self.assertIsNone(payload["warning"])
 
     def test_console_is_served_at_root(self):
         code, headers, body = self.request("GET", "/")
@@ -212,12 +227,129 @@ class EngineTestCase(unittest.TestCase):
         code, _, payload = self.request("POST", "/nope", HEADERS)
         self.assertEqual(code, 404)
 
+    def test_a_second_sigterm_does_not_interrupt_the_shutdown(self):
+        """run.sh traps INT and TERM, so a Ctrl-C there delivers two signals.
+        The second used to land inside release_modifiers() and print a traceback
+        instead of releasing the held modifier."""
+        was = engine._shutting_down
+        engine._shutting_down = False
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                engine._on_sigterm(15, None)
+            # Every later signal is absorbed, however many arrive.
+            for _ in range(3):
+                self.assertIsNone(engine._on_sigterm(15, None))
+        finally:
+            engine._shutting_down = was
+
     def test_shutdown_releases_modifiers(self):
         self.request("POST", "/start", HEADERS)
         self.assertTrue(self._wait_for_calls(1))
         engine.shutdown_engine()
         self.assertEqual(self._wait_for_state("IDLE"), "IDLE")
         self.assertEqual(self.fake.calls[-1][0], "release_modifiers")
+
+
+class UnavailableInputTestCase(EngineHarness):
+    """The engine with a backend that cannot deliver input — the Wayland case.
+
+    The whole point is that this state is impossible to mistake for a working
+    one: /status says so, /start is refused, and no loop thread is ever
+    created. Swapping engine.backend is exactly what get_backend() does at
+    import time on a Wayland machine, so these run the real request path.
+    """
+
+    MESSAGE = "Wayland session detected — synthetic input is not delivered to applications."
+    REMEDY = "Log out and choose \"Ubuntu on Xorg\" at the login screen."
+
+    def setUp(self):
+        super().setUp()
+        self.real_backend = engine.backend
+        engine.backend = UnavailableBackend("pynput", self.MESSAGE, self.REMEDY)
+
+    def tearDown(self):
+        engine.backend = self.real_backend
+        super().tearDown()
+
+    def test_status_says_input_is_not_working_and_explains_why(self):
+        payload = self.status()
+        self.assertEqual(payload["status"], "IDLE")
+        self.assertFalse(payload["inputWorking"])
+        # Both halves reach the console: what is wrong AND what to do about it.
+        self.assertIn(self.MESSAGE, payload["warning"])
+        self.assertIn(self.REMEDY, payload["warning"])
+        # The backend name stays the one the docs use.
+        self.assertEqual(payload["backend"], "pynput")
+
+    def test_start_is_refused_and_no_loop_is_created(self):
+        code, _, payload = self.request("POST", "/start", HEADERS)
+        self.assertEqual(code, 503)
+        self.assertFalse(payload["success"])
+        self.assertIn(self.MESSAGE, payload["message"])
+        self.assertFalse(payload["inputWorking"])
+        # The engine must not merely refuse the HTTP call — it must not have
+        # started a worker, and must not have touched the backend at all.
+        self.assertEqual(self.status()["status"], "IDLE")
+        self.assertEqual(self.real_backend.calls, [])
+
+    def test_repeated_starts_stay_refused(self):
+        for _ in range(3):
+            code, _, _ = self.request("POST", "/start", HEADERS)
+            self.assertEqual(code, 503)
+        self.assertEqual(self.status()["status"], "IDLE")
+
+    def test_the_control_header_is_still_required_first(self):
+        """A missing header is still 403 — the new refusal must not become a
+        way to probe the engine without one."""
+        code, _, payload = self.request("POST", "/start")
+        self.assertEqual(code, 403)
+        self.assertIn(engine.CONTROL_HEADER, payload["message"])
+
+    def test_a_disallowed_origin_is_still_403_not_503(self):
+        code, _, payload = self.request(
+            "POST", "/start", {**HEADERS, "Origin": "http://evil.example"})
+        self.assertEqual(code, 403)
+        self.assertEqual(payload["message"], "origin not allowed")
+
+    def test_stop_still_answers(self):
+        """/stop is always safe, so blocking it would only confuse."""
+        code, _, payload = self.request("POST", "/stop", HEADERS)
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["message"], "Already idle")
+
+    def test_console_and_shutdown_still_work(self):
+        code, _, body = self.request("GET", "/")
+        self.assertEqual(code, 200)
+        self.assertIn(b"Core Emulation Engine Control Console", body)
+        # shutdown_engine() calls release_modifiers() unconditionally; on this
+        # backend that must be a harmless no-op rather than a crash on exit.
+        engine.shutdown_engine()
+
+
+class CaveatedInputTestCase(EngineHarness):
+    """A backend that works but has something worth saying (ENGINE_ALLOW_WAYLAND).
+    The warning must reach /status while /start keeps working normally."""
+
+    def setUp(self):
+        super().setUp()
+        self.fake.input_error = "Wayland session — input reaches only XWayland windows."
+        self.fake.input_remedy = "Switch to Xorg for the rest."
+
+    def tearDown(self):
+        self.fake.input_error = None
+        self.fake.input_remedy = None
+        super().tearDown()
+
+    def test_warning_is_reported_while_input_still_works(self):
+        payload = self.status()
+        self.assertTrue(payload["inputWorking"])
+        self.assertIn("XWayland", payload["warning"])
+
+    def test_start_is_allowed(self):
+        code, _, payload = self.request("POST", "/start", HEADERS)
+        self.assertEqual(code, 200)
+        self.assertTrue(payload["success"])
+        self.assertTrue(self._wait_for_calls(1), "the loop never called the backend")
 
 
 if __name__ == "__main__":

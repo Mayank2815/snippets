@@ -7,14 +7,18 @@ behaves identically on every platform; only the app-switcher chords differ
 
 Linux: pynput needs an X11 session. Under Wayland the X server it connects to
 is XWayland, and the compositor never delivers synthetic XTest input to native
-Wayland windows — the engine reports RUNNING and nothing on screen moves. The
-constructor prints a warning when XDG_SESSION_TYPE says wayland. pynput also
-depends on python-xlib and evdev on Linux; evdev builds a C extension, so pip
-needs a compiler and headers (install.sh prints the apt line if that fails).
+Wayland windows — the engine would report RUNNING while nothing on screen
+moves. That session check does NOT live here: backends/__init__.py runs
+linux_session.check() *before* this module is imported and substitutes an
+UnavailableBackend, so by the time this class is constructed the session is
+already known to be a usable X11 one. See linux_session.py for why.
+
+pynput also depends on python-xlib and evdev on Linux; evdev builds a C
+extension, so pip needs a compiler and headers (install.sh prints the apt line
+if that fails).
 """
 
 import ctypes
-import os
 import random
 import shutil
 import subprocess
@@ -58,10 +62,6 @@ class PynputBackend(InputBackend):
             self.platform_note = "pynput over SendInput (Windows)"
         else:
             self.platform_note = "pynput over X11/XTest (Linux; Wayland sessions do not receive synthetic input)"
-            if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland":
-                print("[Warning] This is a Wayland session. pynput can only reach XWayland windows; "
-                      "native Wayland apps will not see the engine's input. Log in to an X11/Xorg "
-                      "session for the engine to work.")
 
     def mouse_position(self):
         x, y = self._mouse.position

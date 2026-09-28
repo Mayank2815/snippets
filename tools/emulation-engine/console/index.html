@@ -62,6 +62,21 @@
   button.stop { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   .error { color: var(--err); font-size: 13px; min-height: 1.5em; margin: 14px 0 0; }
+  /* The input-unavailable banner. Red left border and a tinted panel so it reads
+     as "this is broken and here is what to do", not as a passing note. */
+  .notice {
+    margin: 0 0 16px;
+    padding: 12px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--err);
+    border-left-width: 4px;
+    background: rgba(248, 81, 73, 0.10);
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .notice.caution { border-color: var(--warn); background: rgba(210, 153, 34, 0.10); }
+  .notice strong { display: block; margin-bottom: 4px; }
+  .notice[hidden] { display: none; }
   .muted { color: var(--muted); font-size: 13px; }
   .pill { font-size: 11px; padding: 3px 9px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); }
   code { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; font-size: 12px; }
@@ -76,6 +91,7 @@
 
   <section class="card">
     <h2>Engine</h2>
+    <p class="notice" id="notice" hidden></p>
     <div class="status">
       <span class="dot" id="dot"></span>
       <span class="label" id="status-text">OFFLINE</span>
@@ -121,18 +137,41 @@
   var errorLine = document.getElementById('error');
   var lastChecked = document.getElementById('last-checked');
   var backendLine = document.getElementById('backend-line');
+  var notice = document.getElementById('notice');
   var busy = false;
 
+  // BLOCKED is not a value the engine ever reports in "status" — the page
+  // derives it when /status says inputWorking is false. The engine refuses
+  // /start with 503 in that state, so showing IDLE would be a lie: the Start
+  // button would look ready and pressing it would do nothing.
   function render(state, detail) {
     // STOPPING: the old loop is finishing its current step. Both buttons stay off —
     // the engine answers 409 to /start until that thread has really ended.
     var amber = state === 'IDLE' || state === 'STOPPING';
     dot.className = 'dot ' + (state === 'RUNNING' ? 'ok' : amber ? 'warn' : 'bad');
-    statusText.textContent = state === 'STOPPING' ? 'Stopping…' : state;
+    statusText.textContent = state === 'STOPPING' ? 'Stopping…'
+      : state === 'BLOCKED' ? 'INPUT UNAVAILABLE'
+      : state;
     statusDetail.textContent = detail;
     startBtn.disabled = busy || state !== 'IDLE';
     stopBtn.disabled = busy || state !== 'RUNNING';
     lastChecked.textContent = 'checked ' + new Date().toLocaleTimeString();
+  }
+
+  // blocked=true paints it red (input cannot be delivered at all); false paints
+  // it amber (input works, but with a caveat worth reading).
+  function showNotice(text, blocked) {
+    if (!text) { notice.hidden = true; notice.textContent = ''; return; }
+    notice.hidden = false;
+    notice.className = 'notice' + (blocked ? '' : ' caution');
+    notice.textContent = '';
+    var head = document.createElement('strong');
+    head.textContent = blocked ? 'This computer cannot be driven right now'
+                               : 'Heads up';
+    notice.appendChild(head);
+    // textContent, never innerHTML: the string comes from the engine, and the
+    // page must not grow a way to inject markup into itself.
+    notice.appendChild(document.createTextNode(text));
   }
 
   function setError(message) {
@@ -148,11 +187,17 @@
       .then(function (data) {
         // Which input backend the engine picked (quartz on darwin, pynput on win32/linux, fake in tests).
         if (data.backend) backendLine.textContent = 'backend: ' + data.backend + ' on ' + (data.platform || '?');
-        if (data.status === 'RUNNING') render('RUNNING', 'Emulation loop is active — the pointer and keys are being driven.');
+        // Older engines have no inputWorking field; treat its absence as "fine"
+        // so this page still works against one.
+        var blocked = data.inputWorking === false;
+        showNotice(data.warning || '', blocked);
+        if (blocked) render('BLOCKED', 'Start is disabled — the engine would report RUNNING and move nothing.');
+        else if (data.status === 'RUNNING') render('RUNNING', 'Emulation loop is active — the pointer and keys are being driven.');
         else if (data.status === 'STOPPING') render('STOPPING', 'Finishing the current step — Start comes back in a moment.');
         else render('IDLE', 'Engine is up and waiting.');
       })
       .catch(function (err) {
+        showNotice('', true);
         render('OFFLINE', 'Engine is not answering — start it with ./run.sh (or run.ps1 on Windows) on this computer.');
         if (busy) setError(err.message);
       });

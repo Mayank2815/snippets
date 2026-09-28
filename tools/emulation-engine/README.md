@@ -17,10 +17,13 @@ self-contained: nothing else in the repo is needed to run it.
 |----------|---------------|---------|-----|-------|
 | macOS    | `quartz` (pyobjc Quartz event taps) | `./install.sh` | `./run.sh` | needs the Accessibility permission (below) |
 | Windows  | `pynput` (SendInput)                | `.\install.ps1` | `.\run.ps1` | no permission step; PowerShell may need an execution-policy line (below) |
-| Linux    | `pynput` (X11 / XTest)              | `./install.sh` | `./run.sh` | **X11 only** — Wayland sessions do not receive synthetic input (below) |
+| Linux    | `pynput` (X11 / XTest)              | `./install.sh` | `./run.sh` | **X11 only** — on Wayland the engine refuses to start and says why (below) |
 
 The backend is chosen automatically from the platform. `GET /status` and the
 console header both report which one is active, e.g. `backend: quartz on darwin`.
+
+Verified end to end on macOS (Quartz), Ubuntu 22.04 and Ubuntu 24.04 (pynput on
+X11, on a desktop with a real window manager).
 
 ## Quick start
 
@@ -49,10 +52,10 @@ your browser. Both are safe to run again at any time.
 
 You need Python 3.9 or newer. On macOS the Xcode Command Line Tools version
 (`xcode-select --install`) is enough; on Windows install it from python.org and
-tick "Add python.exe to PATH"; on Debian/Ubuntu you need `python3-venv`, and
-`build-essential python3-dev` if pip has to compile pynput's `evdev`
-dependency. The install scripts print the exact command when something is
-missing.
+tick "Add python.exe to PATH"; on Debian/Ubuntu you need
+`build-essential python3-dev python3-venv` (all three — see the Linux section
+for why). `install.sh` checks first and prints one `sudo apt install` line with
+everything that is missing, so you never have to guess.
 
 ## macOS: the one manual step — Accessibility permission
 
@@ -88,17 +91,105 @@ permanently. You may also see a SmartScreen "Windows protected your PC" prompt
 the first time — choose **More info → Run anyway**. No Accessibility-style
 permission is needed: the engine drives input through SendInput.
 
-## Linux: X11 only, not Wayland
+## Linux
 
-pynput posts input through the X11 XTest extension. On a Wayland session the
-compositor never delivers synthetic XTest events to native Wayland windows, so
-the engine reports RUNNING and nothing on screen moves. Log in to an
-**X11/Xorg** session (most login screens have a gear icon to pick one).
-`install.sh` and the engine both print a warning when `XDG_SESSION_TYPE` says
-`wayland`.
+### Step 1 — check which kind of session you are in
 
-`wmctrl` is optional: the engine uses it to count open windows so Alt+Tab
-cycles a realistic depth. Without it the count falls back to 5.
+This is the only thing that can stop the tool working on Linux, so check it
+first. In a terminal:
+
+```bash
+echo $XDG_SESSION_TYPE
+```
+
+- **`x11`** — you are good. Skip to step 2.
+- **`wayland`** — the engine cannot drive your computer as things stand. See
+  "If you are on Wayland" below.
+- **nothing at all** — you are probably in a plain text console or connected
+  over SSH. Run the engine from the desktop of the computer you want it to
+  drive.
+
+### Step 2 — install the system packages
+
+Ubuntu and Debian do not ship these by default. `./install.sh` checks for them
+and prints this exact line if any are missing, so you can also just run it and
+see:
+
+```bash
+sudo apt install build-essential python3-dev python3-venv
+```
+
+- `python3-venv` — Ubuntu splits the `venv` module out of `python3`, and
+  without it `./install.sh` cannot create its `.venv` folder.
+- `build-essential` and `python3-dev` — pynput depends on a package called
+  `evdev`, which is published as source only (there is no prebuilt version for
+  **any** processor), so pip has to compile it and needs a C compiler and the
+  Python and Linux headers.
+
+These are the same on Ubuntu 22.04 and 24.04. Then:
+
+```bash
+./install.sh
+./run.sh
+```
+
+### Optional: `wmctrl`
+
+```bash
+sudo apt install wmctrl
+```
+
+The engine uses it to count your open windows, so its Alt+Tab presses cycle a
+realistic number of apps. Without it the count falls back to 5 — everything
+else works exactly the same, and `install.sh` tells you it is missing.
+
+### If you are on Wayland
+
+Ubuntu has used Wayland by default since 21.04. Under Wayland, the desktop
+simply ignores input that comes from a program rather than from real hardware —
+it does not report an error, it discards it. Older X11 apps running through the
+XWayland compatibility layer still see it, but nothing else does, which in
+practice means almost nothing on a modern desktop.
+
+**The engine refuses to run in this state** rather than report RUNNING while
+your pointer sits still. The console page shows a red "INPUT UNAVAILABLE"
+panel, Start is disabled, and `POST /start` answers HTTP 503.
+
+To fix it, switch to an Xorg session — it takes about thirty seconds:
+
+1. Log out.
+2. At the login screen, click your name.
+3. Click the **gear icon** at the bottom right.
+4. Choose **"Ubuntu on Xorg"** (on other desktops: "GNOME on Xorg",
+   "Plasma (X11)").
+5. Type your password and log in.
+6. Check it worked: `echo $XDG_SESSION_TYPE` must now print `x11`.
+7. Run `./run.sh` again.
+
+The choice sticks, so you only do this once.
+
+**If your login screen has no Xorg option**, your desktop has dropped it —
+Ubuntu 25.10 and later, and recent Fedora GNOME, ship Wayland only. There is
+then no way to make this tool work on that desktop, and the honest options are
+to run it on a machine that still offers Xorg, or to install a lighter X11
+desktop (for example `sudo apt install xfce4`, then pick Xfce at the login
+screen) alongside what you have.
+
+**We looked at `ydotool` and decided against it** — see
+[knowledge/lessons.md](knowledge/lessons.md) for the reasoning. The short
+version: it works on Wayland but cannot tell us where the pointer currently is,
+which is the one thing this engine's movement depends on, and it needs a
+background service running as root.
+
+**If you only care about old X11 apps** (a legacy application running under
+XWayland) you can override the refusal:
+
+```bash
+ENGINE_ALLOW_WAYLAND=1 ./run.sh
+```
+
+The engine then runs, and the console still shows an amber warning explaining
+that input reaches XWayland windows only. It is deliberately not silent.
 
 ## Using the console
 
@@ -177,6 +268,8 @@ emulation-engine/
 │   ├── base.py              the contract every backend implements
 │   ├── quartz.py            macOS (pyobjc Quartz event taps)
 │   ├── pynput_backend.py    Windows and Linux (pynput)
+│   ├── linux_session.py     can this Linux session receive input at all?
+│   ├── unavailable.py       stand-in when it cannot, so the console can explain
 │   └── fake.py              records calls, generates nothing (tests)
 ├── engine/tests/            engine tests against the fake backend
 ├── engine/test_metrics.py   offline cadence simulator (make test)
@@ -193,11 +286,28 @@ emulation-engine/
 not running from `.venv`. Run the install script again and start it with the
 run script, not with a bare `python3`.
 
-**RUNNING but nothing moves or types** — on macOS, the terminal app is not
-allowed under Accessibility (see above); toggle it on, quit and reopen the
-terminal, run again, and if it still does nothing add the same app under Input
-Monitoring. On Linux, you are almost certainly on Wayland — switch to an X11
-session.
+**Start does nothing / RUNNING but nothing moves or types** — on macOS, the
+terminal app is not allowed under Accessibility (see above); toggle it on, quit
+and reopen the terminal, run again, and if it still does nothing add the same
+app under Input Monitoring.
+
+On Linux this state should no longer be possible: if the engine cannot deliver
+input it says so in red on the console and refuses to start. So:
+
+- **The console shows a red "INPUT UNAVAILABLE" panel** — read it, it names the
+  problem and the fix. Nearly always it is a Wayland session; see the Linux
+  section above.
+- **The Start button is greyed out and the dot is red** — same thing.
+- **Start works, the dot goes green, and still nothing moves** — that is a real
+  bug, not a known state. Check `echo $XDG_SESSION_TYPE` prints `x11`, then
+  confirm the X server is accepting synthetic input at all:
+  `xdotool mousemove 500 500` should jump your pointer. If that does nothing
+  either, the problem is below this tool.
+- **`install.sh` fails** — it prints one `sudo apt install ...` line with
+  everything that is missing. Run it and re-run `./install.sh`.
+- **`./install.sh: Permission denied`** — the executable bit was lost, which
+  happens when the folder arrives as a zip downloaded from a browser. Fix with
+  `chmod +x install.sh run.sh`, or run `bash install.sh` instead.
 
 **"port 4320 is already in use"** — an older engine is still running. Find it
 with `lsof -nP -iTCP:4320 -sTCP:LISTEN` (`netstat -ano | findstr :4320` on

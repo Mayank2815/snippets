@@ -3,9 +3,18 @@
 A tiny HTTP server on 127.0.0.1:4320 exposes the engine:
 
     GET  /         the control console (console/index.html, next to this folder)
-    GET  /status   {"status": "IDLE" | "RUNNING" | "STOPPING", "backend": ..., "platform": ...}
+    GET  /status   {"status": "IDLE" | "RUNNING" | "STOPPING", "backend": ...,
+                    "platform": ..., "inputWorking": true|false, "warning": null|"..."}
     POST /start    start the emulation loop in a background thread
+                   (503 when inputWorking is false — see below)
     POST /stop     ask the loop to stop after its current step
+
+`inputWorking` is false when the backend exists but cannot actually deliver a
+single event — on Linux that means a Wayland session, or no X display. In that
+state POST /start is refused with 503 and `warning` carries the explanation and
+the fix, which the console shows in red. WHY: on Wayland the injection is
+accepted and silently discarded, so without this the engine would report
+RUNNING for as long as the user cared to watch a pointer that never moves.
 
 POST /start and /stop must carry the header `X-Engine-Control: 1` and, when
 sent by a browser, come from a page served on this computer (see ALLOWED_ORIGIN_RE).
@@ -82,6 +91,13 @@ CONTROL_HEADER = 'X-Engine-Control'
 # of (at most one Cmd+Tab sequence, ~0.6 s) before the process exits, short
 # enough that ./run.sh's Ctrl-C still feels immediate.
 SHUTDOWN_JOIN_SECONDS = 2
+
+# WHY 503 and not 403 or 409: the caller did nothing wrong and retrying the
+# same request will not help until the user changes their session, which is
+# exactly "Service Unavailable". 403 would suggest a permissions header to fix
+# and 409 would suggest waiting a moment, and both are already in use here for
+# those meanings.
+INPUT_UNAVAILABLE_STATUS = 503
 
 # --- FIXED ABSOLUTE TELEMETRY INJECTION KEYBOARD MATRIX ---
 # Strictly bound to pure navigation safe arrow keys as requested
@@ -225,6 +241,16 @@ def engine_state():
         return "IDLE"
     return "STOPPING" if stop_event.is_set() else "RUNNING"
 
+
+def input_warning():
+    """The backend's caveat as one string, or None when there is nothing to say.
+
+    Set on both a refused backend (input_ok False) and a usable-but-caveated
+    one, so the console has something to show in either case.
+    """
+    parts = [part for part in (backend.input_error, backend.input_remedy) if part]
+    return " ".join(parts) if parts else None
+
 class EngineBridgeHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args): return
 
@@ -289,7 +315,16 @@ class EngineBridgeHandler(BaseHTTPRequestHandler):
         if path == '/status':
             with thread_lock:
                 state = engine_state()
-            self._send_json({"status": state, "backend": backend.name, "platform": sys.platform})
+            self._send_json({
+                "status": state,
+                "backend": backend.name,
+                "platform": sys.platform,
+                # WHY these two on every poll: the console polls /status every
+                # 2 s and has no other channel, so an input problem that is not
+                # in this payload cannot reach the person looking at the page.
+                "inputWorking": bool(backend.input_ok),
+                "warning": input_warning(),
+            })
         elif path in ('/', '/index.html'):
             self._send_console()
         else:
@@ -311,6 +346,18 @@ class EngineBridgeHandler(BaseHTTPRequestHandler):
             return
         if self.headers.get(CONTROL_HEADER) != '1':
             self._send_json({"success": False, "message": f"missing {CONTROL_HEADER}: 1 header"}, status=403)
+            return
+
+        # WHY before the lock and before any state check: /start must be
+        # refused outright when the backend cannot deliver input, whatever the
+        # engine state is. Pretending to run is the failure this guards. /stop
+        # is deliberately still allowed — it is always safe and always idle here.
+        if path == '/start' and not backend.input_ok:
+            self._send_json({
+                "success": False,
+                "message": input_warning() or "input is not available on this session",
+                "inputWorking": False,
+            }, status=INPUT_UNAVAILABLE_STATUS)
             return
 
         with thread_lock:
@@ -354,9 +401,27 @@ def shutdown_engine():
     backend.release_modifiers()
 
 
+# True once a shutdown has begun. See _on_sigterm.
+_shutting_down = False
+
+
 def _on_sigterm(signum, frame):
     # WHY raise KeyboardInterrupt: run.sh's trap sends SIGTERM; funnelling it
     # into the same path as Ctrl-C gives one shutdown sequence for both.
+    global _shutting_down
+    if _shutting_down:
+        # WHY ignore the second one: a SIGTERM arriving while the first is
+        # still being handled lands wherever the interpreter happens to be —
+        # in practice inside backend.release_modifiers(), where it escapes that
+        # method's `except Exception` (KeyboardInterrupt is not an Exception)
+        # and prints a traceback INSTEAD of releasing the held modifier. That
+        # is the one thing shutdown exists to do, and a stuck Alt affects every
+        # later click and keystroke in the session. run.sh's trap fires on both
+        # INT and TERM, so a Ctrl-C there sends two; supervisors often do too.
+        # Shutdown is bounded by SHUTDOWN_JOIN_SECONDS, and SIGKILL still works
+        # if it ever did hang.
+        return
+    _shutting_down = True
     raise KeyboardInterrupt
 
 def main():
@@ -368,6 +433,25 @@ def main():
     print(f"   Console: http://{BIND_HOST}:{PORT}/")
     print(f"   Backend: {backend.name} on {sys.platform} ({backend.platform_note}); screen {width}x{height}")
     print("=========================================================")
+    # WHY repeat the warning here as a block: run.sh opens the console in a
+    # browser, so the terminal is usually behind it — but someone who started
+    # the engine by hand, or who is reading a redirected log, has only this.
+    # The console shows the same text in red on the page they are looking at.
+    if not backend.input_ok:
+        print()
+        print("  !!  INPUT UNAVAILABLE — the engine will not start the loop  !!")
+        print(f"  {backend.input_error}")
+        if backend.input_remedy:
+            print()
+            print(f"  {backend.input_remedy}")
+        print()
+        print("  The console at the address above says the same thing. POST /start")
+        print(f"  is refused with HTTP {INPUT_UNAVAILABLE_STATUS} until this is fixed.")
+        print("=========================================================")
+    elif backend.input_error:
+        print()
+        print(f"  Warning: {backend.input_error}")
+        print("=========================================================")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -12,9 +12,11 @@ One process, two threads, one HTML file, one input backend per platform.
  |  main thread: HTTPServer on 127.0.0.1:4320  (EngineBridgeHandler)    |
  |      GET  /          -> reads ../console/index.html, serves it       |
  |      GET  /status    -> {"status": IDLE|RUNNING|STOPPING,            |
- |                          "backend": "quartz", "platform": "darwin"}  |
- |      POST /start     -> new stop Event + loop_worker thread, or 409  |
- |                         while the previous worker is still alive     |
+ |                          "backend": "quartz", "platform": "darwin",  |
+ |                          "inputWorking": true, "warning": null}      |
+ |      POST /start     -> new stop Event + loop_worker thread; 409     |
+ |                         while the previous worker is still alive;    |
+ |                         503 when the backend cannot deliver input    |
  |      POST /stop      -> sets the worker's Event; loop exits after    |
  |                         its current step                             |
  |      OPTIONS *       -> 200 + CORS headers (preflight)               |
@@ -27,9 +29,13 @@ One process, two threads, one HTML file, one input backend per platform.
  +--------------------- engine/backends/ (get_backend()) ---------------+
  |  base.py    the contract: mouse_position, screen_size, move_mouse,   |
  |             click, scroll, tap_key, app_switch, browser_tab_next,    |
- |             visible_app_count, release_modifiers, name, platform_note|
+ |             visible_app_count, release_modifiers, name, platform_note,|
+ |             input_ok, input_error, input_remedy                      |
  |  quartz.py  darwin -> CGEventPost -> kCGHIDEventTap -> macOS input   |
  |  pynput_backend.py  win32 -> SendInput | linux -> X11/XTest          |
+ |  linux_session.py   x11 / wayland / headless, from the environment   |
+ |  unavailable.py     input_ok=False stand-in when the session cannot  |
+ |                     receive input; every input method raises         |
  |  fake.py    records every call, generates nothing (tests, CI)        |
  +----------------------------------------------------------------------+
 ```
@@ -53,6 +59,38 @@ the whole engine on a developer's Mac without moving the real pointer. An
 unknown override or an unsupported platform raises `ValueError`, and a missing
 platform library raises `ImportError`; `engine.py` catches both and exits with
 one clear line rather than a traceback from deep inside an import.
+
+### Can this session actually receive input?
+
+Every backend also answers three questions the loop never asks but the *user*
+needs: `input_ok`, `input_error` and `input_remedy`. They exist because of one
+platform, Linux, where a backend can construct perfectly and still deliver
+nothing: under Wayland the XTest calls succeed and the compositor discards
+them, so the engine would sit in RUNNING while the pointer never moves.
+
+`backends/linux_session.py` classifies the session from its environment alone —
+`x11`, `wayland` or `headless` — before pynput is imported. It is a pure
+function, which is what lets the tests cover every branch on a machine with no
+X server and no compositor. Either Wayland signal (`WAYLAND_DISPLAY`, or
+`XDG_SESSION_TYPE=wayland`) is decisive: a desktop can set one and not the
+other, and refusing an X11 session that left a stale variable around is a
+visible, overridable annoyance, while the opposite mistake is invisible.
+
+When the verdict is negative, `get_backend()` returns an `UnavailableBackend`
+rather than raising. The server therefore still starts, which is the point: the
+console — the page `run.sh` just opened in the user's browser — is the only
+surface they are looking at, so it has to be the surface that explains the
+problem. `/status` carries `inputWorking: false` and a `warning` holding both
+the cause and the fix, `POST /start` answers **503** before touching the lock
+or the thread state, the console paints a red "INPUT UNAVAILABLE" panel with
+Start disabled, and the startup banner prints the same text for anyone reading
+a log. `UnavailableBackend`'s input methods raise rather than pass, so a future
+caller that forgets to check `input_ok` fails loudly instead of silently doing
+nothing — the exact bug the class was added to prevent.
+
+`ENGINE_ALLOW_WAYLAND=1` keeps `input_ok` True while leaving the warning in
+place, for someone who only drives XWayland windows. It turns a refusal into a
+visible caveat, never into silence.
 
 ### What differs per platform, and what does not
 
@@ -168,7 +206,12 @@ console renders as "Stopping…" with both buttons disabled.
 
 **Shutdown.** Ctrl-C and SIGTERM (what `run.sh`'s trap sends) take the same
 path: close the socket, set the Event, join the worker for up to 2 s, then
-call `backend.release_modifiers()` regardless — if the worker was killed in
+call `backend.release_modifiers()` regardless. Only the **first** signal starts
+that — `_on_sigterm` sets `_shutting_down` and ignores every later one, because
+`run.sh` traps INT and TERM both and a second `KeyboardInterrupt` landed inside
+`release_modifiers()`, sailed past its `except Exception` (a `KeyboardInterrupt`
+is not one) and skipped the release, leaving the modifier held for the rest of
+the session — if the worker was killed in
 the middle of an app switch, the synthetic modifier (Command on macOS,
 Alt/Ctrl elsewhere) would otherwise stay held for the rest of the login
 session. The thread is a daemon, so a worker that has not finished in 2 s never
@@ -225,7 +268,22 @@ relative to its own file (`../console/index.html`) so it works from any
 current directory. The page polls `/status` every 2 s, renders OFFLINE / IDLE /
 RUNNING / Stopping…, enables Start only when IDLE and Stop only when RUNNING
 (neither while stopping), sends `X-Engine-Control: 1` on its POSTs, and shows
-the last error under the buttons. It reads the engine address from
+the last error under the buttons.
+
+It derives one more state the engine never reports in `status`: when
+`inputWorking` is false it shows **INPUT UNAVAILABLE** with a red dot, a red
+panel carrying the `warning` text, and Start disabled — showing IDLE there
+would be a lie, since pressing Start only produces a 503. A `warning` with
+`inputWorking` still true (the `ENGINE_ALLOW_WAYLAND` case) paints the same
+panel amber and leaves the buttons alone. The warning is inserted with
+`textContent`, never `innerHTML`, so the page cannot grow a way to inject
+markup into itself. An engine from before this field existed sends no
+`inputWorking` at all, and `undefined` is deliberately not treated as false.
+
+`tools/workbench/index.html` embeds this console in an iframe and shows its own
+one-line pill from the same `/status` poll; it reads `inputWorking` too, so the
+pill does not say "idle" next to a console that says the machine cannot be
+driven. It reads the engine address from
 `location.origin` (normal case), or from `?engine=http://127.0.0.1:4321` if
 opened from disk or pointed at a different port. The palette is copied from the
 task-notif dashboard so the tools look related.
@@ -236,22 +294,40 @@ task-notif dashboard so the tools look related.
 `install.ps1`). On macOS it checks that the Command Line Tools are present when
 `python3` is only Apple's stub (and says to run `xcode-select --install`),
 proves `import Quartz.CoreGraphics` works from the venv, and prints the
-Accessibility steps. On Linux it prints `sudo apt install python3-venv` when
-`python3 -m venv` fails, `sudo apt install build-essential python3-dev` when
-pip cannot build pynput's `evdev` dependency, warns when `wmctrl` is missing
-(optional) and when `XDG_SESSION_TYPE` is `wayland`, and checks pynput with
-`importlib.util.find_spec` rather than importing it — importing pynput on Linux
-connects to the X server at once and fails without `DISPLAY`, which says
-nothing about whether the install worked. Both paths check `python3 >= 3.9` and
-reuse an existing `.venv`.
+Accessibility steps.
 
-`run.sh` refuses without `.venv`, refuses if the port is already bound (with
-the `lsof` line to find the culprit), starts the engine in the background,
-polls `/status` for up to 10 s, opens the console unless `--no-open` (`open` on
-macOS, `xdg-open` on Linux, silently skipped when neither exists — a headless
-box has neither), and `wait`s on the engine so Ctrl-C reaches both. A trap
-sends the engine SIGTERM on any exit, which the engine handles exactly like
-Ctrl-C (see Shutdown above).
+On Linux it runs a **preflight before doing any work**: it checks `ensurepip`,
+a C compiler, `Python.h` and `linux/input.h`, and prints a single
+`sudo apt install build-essential python3-dev python3-venv` line naming
+whatever is missing. All three are needed on a stock Ubuntu desktop — Ubuntu
+splits `venv` out of `python3`, and pynput's `evdev` dependency ships as source
+with **no wheels for any architecture**, so everyone compiles it. Without the
+preflight a fresh machine failed twice in a row with a different apt line each
+time. The preflight only insists on Debian/Ubuntu, where those package names
+are correct; elsewhere it names what is missing and continues.
+
+It then warns when `wmctrl` is missing (optional), asks
+`linux_session.check()` for the session verdict and prints the message and
+remedy when it is negative (the same detector the engine uses, so the two can
+never disagree), and checks pynput with `importlib.util.find_spec` rather than
+importing it — importing pynput on Linux connects to the X server at once and
+fails without `DISPLAY`, which says nothing about whether the install worked.
+Both paths check `python3 >= 3.9` and reuse an existing `.venv`.
+
+`run.sh` refuses without `.venv`, refuses if the port is already bound, starts
+the engine in the background, polls `/status` for up to 10 s, opens the console
+unless `--no-open` (`open` on macOS, `xdg-open` on Linux, silently skipped when
+neither exists — a headless box has neither), and `wait`s on the engine so
+Ctrl-C reaches both. A trap sends the engine SIGTERM on any exit, which the
+engine handles exactly like Ctrl-C (see Shutdown above).
+
+Both of its probes fall back to `.venv/bin/python`, because **neither `curl`
+nor `lsof` is installed on a stock Ubuntu desktop**. Without the fallback the
+readiness loop printed `curl: command not found` on every attempt and then
+"the engine did not answer" — about an engine that was up and healthy. The
+port probe sets `SO_REUSEADDR` to match `http.server`'s `allow_reuse_address`,
+or a socket still in `TIME_WAIT` from an engine that just exited reads as
+"port in use" for a minute after every stop.
 
 `install.ps1` and `run.ps1` are the Windows equivalents, written for Windows
 PowerShell 5.1 with no external modules. `install.ps1` finds Python through
