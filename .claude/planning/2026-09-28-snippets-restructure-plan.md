@@ -198,12 +198,14 @@ Done, in this order, all via rebase-merged PRs on github.com/Mayank2815/snippets
 | #5 | `tools/keep-alive`: own Express service, UI, store, Docker, tests, knowledge; removed from task-notif |
 | #7 | keep-alive review fixes (hours validation crash, legacy import guard, SSRF hardening, JSON 404s) |
 | #6 | `tools/workbench` (nginx + tab page) and `deploy/` (whole VM stack, migration from /opt/task-notif) |
-
 The final design differs from the first draft in two ways: the workbench uses one iframe per
 tool rather than importing panels (true independence, and the engine tab naturally targets
 the viewer's Mac), and the legacy Keep Alive import reads a snapshot taken by deploy.sh
 instead of a live read-only mount (the live read was a race).
 
+| #8 | This plan and the request log, committed with the project |
+| #9 | emulation-engine review fixes (double-loop race on Stop then Start, origin allow-list + control header on POST, SIGTERM shutdown) |
+
 Not done in this session: the first real deploy to the VM with `./deploy/deploy.sh user@host`
-(host not known to the agent), and the emulation-engine review fixes were in flight as a
-separate PR when this was written.
+(host not known to the agent). The script migrates an existing `/opt/task-notif` install on
+its first run.
