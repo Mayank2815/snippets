@@ -34,6 +34,13 @@ for tool in "${VM_TOOLS[@]}"; do
 done
 rsync -az "$ROOT/deploy/docker-compose.yml" "$TARGET:$REMOTE_DIR/deploy/docker-compose.yml"
 
+# Keep Alive once lived inside task-notif and kept its instance list in that tool's
+# store.json. The new task-notif drops that block on its first write, so the list is
+# copied aside before anything restarts; keep-alive imports it on its first boot only.
+echo "==> Preserving any legacy Keep Alive instances from task-notif's store"
+ssh "$TARGET" "if [ -f '$REMOTE_DIR/tools/task-notif/data/store.json' ] && [ ! -f '$REMOTE_DIR/tools/keep-alive/data/keep-alive.json' ]; then
+  cp -n '$REMOTE_DIR/tools/task-notif/data/store.json' '$REMOTE_DIR/tools/keep-alive/data/legacy-task-notif-store.json' && echo '    snapshot taken'; else echo '    nothing to do'; fi"
+
 echo "==> Building and restarting the stack"
 ssh "$TARGET" "cd '$REMOTE_DIR/deploy' && docker compose up -d --build"
 
