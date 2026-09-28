@@ -30,11 +30,12 @@ services:
     environment:
       TZ: UTC
       # Keep Alive used to live inside task-notif and stored its instances in that
-      # tool's store.json. On first boot with an empty store it copies them from here.
-      LEGACY_TASK_NOTIF_STORE: /legacy/store.json
+      # tool's store.json. deploy.sh snapshots that file into keep-alive's own data dir
+      # before the stack starts (the new task-notif drops the block on its next write,
+      # so reading the live file would be a race); the first boot imports from the copy.
+      LEGACY_TASK_NOTIF_STORE: /app/data/legacy-task-notif-store.json
     volumes:
       - ../tools/keep-alive/data:/app/data
-      - ../tools/task-notif/data:/legacy:ro
     ports:
       - "127.0.0.1:4311:4311"
 
