@@ -49,8 +49,9 @@ Open <http://127.0.0.1:4320/> (run.sh does this for you). The page is served by
 the engine itself and shows:
 
 - a status dot and label, refreshed every 2 seconds from `GET /status`:
-  **OFFLINE** (engine not answering), **IDLE** (up, waiting) or **RUNNING**
-  (driving input right now);
+  **OFFLINE** (engine not answering), **IDLE** (up, waiting), **RUNNING**
+  (driving input right now) or **Stopping…** (you pressed Stop and the loop is
+  finishing its current step — both buttons stay off until it has);
 - **Start** and **Stop** buttons, which call `POST /start` and `POST /stop`;
 - a "Last error" line if a call fails;
 - when it last checked.
@@ -58,13 +59,15 @@ the engine itself and shows:
 Once you press Start, the engine takes over the pointer and keyboard of the
 window in front: a curved mouse move, a short burst of arrow/Shift presses,
 then one of Cmd+Tab, Cmd+Option+Right or a scroll, an occasional click, and a
-10–12 second pause before the next cycle. Press **Stop** to end the loop; the
+9.5–12.5 second pause before the next cycle. Press **Stop** to end the loop; the
 current step finishes first, so allow a couple of seconds.
 
 ## Stopping it
 
 - **Stop** in the console stops the loop but leaves the server up.
-- **Ctrl-C** in the terminal running `./run.sh` stops everything.
+- **Ctrl-C** in the terminal running `./run.sh` stops everything (so does
+  `kill <pid>`: the engine treats SIGTERM like Ctrl-C, waits up to 2 s for the
+  loop to finish its step and releases the Command key before exiting).
 - From another shell: `lsof -nP -iTCP:4320 -sTCP:LISTEN` shows the PID, then
   `kill <pid>`.
 
@@ -123,6 +126,10 @@ Security → Automation.
 ## Safety notes
 
 - The server binds to `127.0.0.1` only. Nothing on your network can reach it.
+- Your own browser *is* on `127.0.0.1`, so the engine also refuses `POST /start`
+  and `/stop` unless they carry an `X-Engine-Control: 1` header and come from a
+  page served on this Mac (`http://127.0.0.1` or `http://localhost`, any port).
+  A random web page you visit cannot start it from JavaScript.
 - It never types letters or digits — only arrow keys, Shift, Cmd+Tab,
   Cmd+Option+Right and scroll — but it will act on whatever window is in
   front. Do not leave it running over an open chat box or a form.

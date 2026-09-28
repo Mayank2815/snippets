@@ -2,6 +2,46 @@
 
 Dated, newest first. Add to this file whenever the engine bites you.
 
+## 2026-09-28 — review findings: the double-loop race and the CORS hole
+
+- **Stop-then-Start could run two loops at once.** `/stop` only cleared a
+  shared `is_running` boolean; the worker checked it between events, but its
+  end-of-cycle `time.sleep(9.5–12.5)` did not. Press Stop, then Start again
+  inside that window: `/start` saw `is_running == False`, set it back to
+  `True` and spawned a second thread, and the *old* thread woke from its
+  sleep, saw `True` and kept going. Reproduced with a Quartz-stubbed copy of
+  the engine: events arrived from two thread ids. The fix is a
+  `threading.Event` handed to each worker at start; `/stop` sets that
+  worker's Event and nothing ever clears one, so a stopped worker cannot be
+  revived. While the old thread is still alive `/status` says `STOPPING`,
+  the console shows "Stopping…" with both buttons off, and `/start` answers
+  `409 {"success": false, "message": "stopping, try again in a moment"}`. The
+  long pause is now `stop.wait(...)`, so Stop also takes effect at once
+  instead of up to 12.5 s later.
+
+- **`Access-Control-Allow-Origin: *` was not made safe by binding to
+  loopback.** The user's own browser is on loopback too, so any web page they
+  visited could `POST /start` from JavaScript — a bare POST is a "simple
+  request" that needs no preflight — and drive their mouse. Now the Origin
+  is reflected only when it is `http://127.0.0.1[:port]` or
+  `http://localhost[:port]` (no Origin, i.e. curl, is fine too); every other
+  Origin gets no CORS headers, and `POST /start` / `/stop` also require
+  `X-Engine-Control: 1` (403 without it), which forces a preflight the
+  disallowed page fails. The console sends the header itself. Consequence: a
+  page served from a remote host (the team workbench on its VM) can no longer
+  read `/status` cross-origin — it must iframe the engine's own console or use
+  an opaque `no-cors` probe.
+
+- **Smaller things fixed in the same pass.** `osascript` now has
+  `timeout=5` (the Automation permission dialog used to be able to hang the
+  worker so `/stop` never took effect); SIGTERM from `run.sh`'s trap is handled
+  like Ctrl-C (stop, join 2 s, Command key-up so a synthetic modifier is never
+  left held, "Shutdown complete."); `POST /start?x=1` no longer 404s; stdout is
+  line-buffered so a redirected log fills in live; `make bundle` uses the
+  folder's real name so a renamed copy still bundles; `install.sh` checks for
+  the Command Line Tools before trusting `python3` (Apple's stub used to have
+  its "xcode-select: note" printed as if it were a version).
+
 ## 2026-09-28 — the extraction from task-notif
 
 - **The source file was two copies of itself.** `mac_engine.py` in task-notif
@@ -87,10 +127,12 @@ Dated, newest first. Add to this file whenever the engine bites you.
   clamped to x 200–1100, y 200–650, which on a larger external display keeps
   it in the top-left region. Widen the clamp if that matters.
 
-- **Stop is not instant.** `/stop` only clears `is_running`; the worker
-  checks it between events, so the loop ends within the current step — up to
-  the 9.5–12.5 s end-of-cycle sleep. Ctrl-C on the server is immediate because
-  the worker is a daemon thread.
+- **Stop is not instant, but it is quick.** `/stop` sets the worker's Event;
+  the worker checks it between events and the end-of-cycle pause waits on it,
+  so the loop ends within the current step — at worst one Cmd+Tab sequence
+  (about 0.6 s). Until the thread has really ended `/status` says `STOPPING`
+  and `/start` answers 409. Ctrl-C / SIGTERM on the server waits up to 2 s for
+  the worker, then exits regardless because the worker is a daemon thread.
 
 - **The server is single-threaded.** Fine for a 2 s poll, but do not put slow
   work in a handler — it would block `/stop`.

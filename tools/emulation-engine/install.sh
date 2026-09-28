@@ -17,6 +17,21 @@ if ! command -v "$PYTHON" >/dev/null 2>&1; then
   exit 1
 fi
 
+# WHY check the Command Line Tools before running python: on a Mac without them,
+# `command -v python3` still finds Apple's /usr/bin/python3, which is only a stub
+# that prints "xcode-select: note: No developer tools were found..." and exits.
+# The version check below used to print that note as if it were a Python version.
+if ! xcode-select -p >/dev/null 2>&1 && ! "$PYTHON" -c 'pass' >/dev/null 2>&1; then
+  echo "install.sh: the Xcode Command Line Tools are not installed, so '$PYTHON' is only Apple's placeholder." >&2
+  echo "install.sh: install them with:  xcode-select --install   (or install Python from python.org), then re-run." >&2
+  exit 1
+fi
+if ! "$PYTHON" -c 'pass' >/dev/null 2>&1; then
+  echo "install.sh: '$PYTHON' cannot run at all:" >&2
+  "$PYTHON" -c 'pass' >&2 || true
+  exit 1
+fi
+
 # WHY 3.9: the oldest Python the pinned pyobjc range ships wheels for, and the
 # version Apple's Command Line Tools provide out of the box.
 if ! "$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)'; then

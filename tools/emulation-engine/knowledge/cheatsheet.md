@@ -21,28 +21,34 @@ python3 engine/test_metrics.py            # offline cadence simulator, needs no 
 | Method  | Path      | Response                                              |
 |---------|-----------|-------------------------------------------------------|
 | GET     | `/`       | the console page (`console/index.html`)               |
-| GET     | `/status` | `{"status": "IDLE"}` or `{"status": "RUNNING"}`       |
-| POST    | `/start`  | `{"success": true, "message": "Stabilized Engine Activated"}` (or "Engine confirmed running") |
-| POST    | `/stop`   | `{"success": true, "message": "Stabilized Engine Deactivated"}` or `{"success": false, "message": "Already idle"}` |
+| GET     | `/status` | `{"status": "IDLE"}`, `{"status": "RUNNING"}` or `{"status": "STOPPING"}` (old loop still finishing its step) |
+| POST    | `/start`  | `{"success": true, "message": "Stabilized Engine Activated"}` (or "Engine confirmed running"); **409** `{"success": false, "message": "stopping, try again in a moment"}` while STOPPING |
+| POST    | `/stop`   | `{"success": true, "message": "Stabilized Engine Deactivated"}`, `{"success": true, "message": "Already stopping"}` or `{"success": false, "message": "Already idle"}` |
 | OPTIONS | any       | 200 with CORS headers (preflight)                     |
 | *       | other     | 404 `{"error": "not found"}`                          |
 
-Every response carries `Access-Control-Allow-Origin: *`,
-`Access-Control-Allow-Methods: GET, POST, OPTIONS` and
-`Access-Control-Allow-Headers: Content-Type`.
+`POST /start` and `/stop` require the header `X-Engine-Control: 1` — without
+it, or from a browser Origin that is not `http://127.0.0.1[:port]` /
+`http://localhost[:port]`, they answer **403** `{"success": false, ...}`.
+
+CORS headers are sent only when the request has no `Origin` (curl) or an
+allowed one: `Access-Control-Allow-Origin: <that origin>` (omitted when there
+is no Origin), `Vary: Origin`, `Access-Control-Allow-Methods: GET, POST,
+OPTIONS`, `Access-Control-Allow-Headers: Content-Type, X-Engine-Control` and
+`Access-Control-Allow-Private-Network: true`. Any other Origin gets none.
 
 ```bash
 curl -i http://127.0.0.1:4320/status
-curl -i -X OPTIONS http://127.0.0.1:4320/status
-curl -X POST http://127.0.0.1:4320/stop      # safe: only clears the flag
-curl -X POST http://127.0.0.1:4320/start     # CAREFUL: moves the mouse and presses keys on this Mac
+curl -i -X OPTIONS -H 'Origin: http://localhost:4310' http://127.0.0.1:4320/status
+curl -X POST -H 'X-Engine-Control: 1' http://127.0.0.1:4320/stop      # safe: only asks the loop to end
+curl -X POST -H 'X-Engine-Control: 1' http://127.0.0.1:4320/start     # CAREFUL: moves the mouse and presses keys on this Mac
 ```
 
 ## Port and process
 
 - Binds `127.0.0.1:4320` only; override the port with `PORT=<n>`, never the address.
 - Who has the port: `lsof -nP -iTCP:4320 -sTCP:LISTEN`
-- Stop a stray engine: `kill $(lsof -t -nP -iTCP:4320 -sTCP:LISTEN)`
+- Stop a stray engine: `kill $(lsof -t -nP -iTCP:4320 -sTCP:LISTEN)` — SIGTERM is handled like Ctrl-C (loop stopped, Command key released, "Shutdown complete.")
 
 ## Permissions
 
