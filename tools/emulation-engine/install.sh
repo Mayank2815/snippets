@@ -13,12 +13,34 @@ if [[ "$OS" != "Darwin" && "$OS" != "Linux" ]]; then
   exit 1
 fi
 
+PKG_MANAGER=""
+if [[ "$OS" == "Linux" ]]; then
+  # packages.sh knows which package manager this machine uses and what each
+  # requirement is called there. It is pure bash and only defines functions, so
+  # it can be sourced before we know whether python3 even exists.
+  if [[ ! -r packages.sh ]]; then
+    echo "install.sh: packages.sh is missing from this folder, and install.sh needs it to name the" >&2
+    echo "install.sh: packages your distribution uses. Re-copy the whole emulation-engine folder." >&2
+    exit 1
+  fi
+  # shellcheck source=packages.sh
+  source ./packages.sh
+  PKG_MANAGER="$(pkg_manager)"
+fi
+
 PYTHON="${PYTHON:-python3}"
 if ! command -v "$PYTHON" >/dev/null 2>&1; then
   if [[ "$OS" == "Darwin" ]]; then
     echo "install.sh: python3 was not found. Install the Xcode Command Line Tools (xcode-select --install) or Python from python.org, then re-run." >&2
   else
-    echo "install.sh: python3 was not found. Install it with your package manager (Debian/Ubuntu:  sudo apt install python3 python3-venv), then re-run." >&2
+    python_line="$(pkg_install_command "$PKG_MANAGER" python venv || true)"
+    if [[ "$PKG_MANAGER" == "apt" ]]; then
+      echo "install.sh: python3 was not found. Install it with your package manager (Debian/Ubuntu:  $python_line), then re-run." >&2
+    elif [[ -n "$python_line" ]]; then
+      echo "install.sh: python3 was not found. Install it with:  $python_line   then re-run." >&2
+    else
+      echo "install.sh: python3 was not found. Install $(pkg_generic_description python) with your package manager, then re-run." >&2
+    fi
   fi
   exit 1
 fi
@@ -55,43 +77,58 @@ fi
 # wheels for any architecture, so the compiler is needed on every Linux machine,
 # not just unusual ones — it is safe to insist on it up front.
 if [[ "$OS" == "Linux" ]]; then
-  missing_pkgs=()
+  # The needs are abstract on purpose — "the Python headers" is python3-dev on
+  # Debian, python3-devel on Fedora and openSUSE, and part of plain `python` on
+  # Arch. packages.sh turns each one into the right name for this machine.
+  missing_needs=()
   missing_why=()
 
   if ! "$PYTHON" -c 'import ensurepip' >/dev/null 2>&1; then
-    missing_pkgs+=("python3-venv")
-    missing_why+=("python3-venv    — without it '$PYTHON -m venv' cannot create .venv")
+    missing_needs+=("venv")
+    missing_why+=("without it '$PYTHON -m venv' cannot create .venv")
   fi
   if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then
-    missing_pkgs+=("build-essential")
-    missing_why+=("build-essential — a C compiler, to build pynput's evdev dependency")
+    missing_needs+=("compiler")
+    missing_why+=("a C compiler, to build pynput's evdev dependency")
   elif [[ ! -e /usr/include/linux/input.h ]]; then
-    # linux/input.h comes from linux-libc-dev, which build-essential pulls in.
-    missing_pkgs+=("build-essential")
-    missing_why+=("build-essential — brings linux/input.h, which evdev needs to build")
+    # linux/input.h comes from linux-libc-dev on Debian, kernel-headers on
+    # Fedora, linux-api-headers on Arch — all normally pulled in by the
+    # compiler package, so this branch only fires on an unusual machine.
+    missing_needs+=("kernel_headers")
+    missing_why+=("brings linux/input.h, which evdev needs to build")
   fi
   if ! "$PYTHON" -c 'import os, sysconfig, sys; sys.exit(0 if os.path.exists(os.path.join(sysconfig.get_paths()["include"], "Python.h")) else 1)' >/dev/null 2>&1; then
-    missing_pkgs+=("python3-dev")
-    missing_why+=("python3-dev     — Python.h, which evdev needs to build")
+    missing_needs+=("python_headers")
+    missing_why+=("Python.h, which evdev needs to build")
   fi
 
-  if [[ ${#missing_pkgs[@]} -gt 0 ]]; then
+  if [[ ${#missing_needs[@]} -gt 0 ]]; then
     echo "install.sh: this machine is missing some system packages the install needs:" >&2
-    for line in "${missing_why[@]}"; do echo "    $line" >&2; done
+    for i in "${!missing_needs[@]}"; do
+      need="${missing_needs[$i]}"
+      need_pkg="$(pkg_name "$PKG_MANAGER" "$need")"
+      if [[ -n "$need_pkg" ]]; then
+        printf '    %-15s — %s\n' "$need_pkg" "${missing_why[$i]}" >&2
+      else
+        # No package name to give, so name the requirement itself.
+        printf '    %s\n' "$(pkg_generic_description "$need")" >&2
+      fi
+    done
     echo >&2
-    if command -v apt >/dev/null 2>&1 || command -v apt-get >/dev/null 2>&1; then
-      # Deduplicate: build-essential can be added by either of the two checks.
-      readarray -t uniq_pkgs < <(printf '%s\n' "${missing_pkgs[@]}" | sort -u)
+    if install_line="$(pkg_install_command "$PKG_MANAGER" "${missing_needs[@]}")"; then
       echo "install.sh: install them all in one go with:" >&2
       echo >&2
-      echo "    sudo apt install ${uniq_pkgs[*]}" >&2
+      echo "    $install_line" >&2
       echo >&2
       echo "install.sh: then re-run ./install.sh." >&2
       exit 1
     fi
-    # Not a Debian/Ubuntu machine: the package names above are wrong there, so
-    # say what is needed and carry on rather than block on a guess.
-    echo "install.sh: install the equivalents for your distribution, then re-run if the install below fails." >&2
+    # Unrecognised package manager: printing a package name that does not exist
+    # on this distribution would be worse than printing none, so name the
+    # requirements in plain words and carry on — pip may still succeed below.
+    echo "install.sh: this machine's package manager was not recognised — none of apt, dnf, pacman" >&2
+    echo "install.sh: or zypper is on PATH — so there is no exact command to print. Install the" >&2
+    echo "install.sh: things listed above using whatever your distribution provides, then re-run." >&2
     echo >&2
   fi
 fi
@@ -104,10 +141,21 @@ else
     if [[ "$OS" == "Linux" ]]; then
       # WHY: Debian and Ubuntu ship python3 without the venv module; it is a
       # separate package, and `python3 -m venv` fails with "ensurepip is not
-      # available" until it is installed.
-      echo "install.sh: could not create .venv. On Debian/Ubuntu install the venv module with:" >&2
-      echo "    sudo apt install python3-venv" >&2
-      echo "then re-run ./install.sh." >&2
+      # available" until it is installed. Fedora, Arch and openSUSE bundle it,
+      # so there the fix is to install (or repair) python3 itself.
+      venv_line="$(pkg_install_command "$PKG_MANAGER" venv || true)"
+      if [[ "$PKG_MANAGER" == "apt" ]]; then
+        echo "install.sh: could not create .venv. On Debian/Ubuntu install the venv module with:" >&2
+        echo "    $venv_line" >&2
+        echo "then re-run ./install.sh." >&2
+      elif [[ -n "$venv_line" ]]; then
+        echo "install.sh: could not create .venv. Install Python's venv support with:" >&2
+        echo "    $venv_line" >&2
+        echo "then re-run ./install.sh." >&2
+      else
+        echo "install.sh: could not create .venv. Install $(pkg_generic_description venv) with your" >&2
+        echo "install.sh: distribution's package manager, then re-run ./install.sh." >&2
+      fi
     else
       echo "install.sh: could not create .venv with $PYTHON — see the error above." >&2
     fi
@@ -122,11 +170,18 @@ if ! .venv/bin/python -m pip install --quiet -r requirements.txt; then
   if [[ "$OS" == "Linux" ]]; then
     # WHY: pynput depends on evdev, which is a C extension with no binary
     # wheel; pip builds it and needs a compiler plus the Python and kernel
-    # headers. The apt line below provides all three on Debian/Ubuntu.
+    # headers. The line below names the packages that provide all three on
+    # whichever distribution this is.
     echo "install.sh: pip could not install the requirements. If the error above mentions evdev or a missing" >&2
     echo "install.sh: compiler/header (gcc, Python.h, linux/input.h), install the build tools with:" >&2
-    echo "    sudo apt install build-essential python3-dev" >&2
-    echo "then re-run ./install.sh." >&2
+    build_line="$(pkg_install_command "$PKG_MANAGER" compiler python_headers || true)"
+    if [[ -n "$build_line" ]]; then
+      echo "    $build_line" >&2
+      echo "then re-run ./install.sh." >&2
+    else
+      echo "    $(pkg_generic_description compiler) and $(pkg_generic_description python_headers)," >&2
+      echo "    installed with whatever your distribution provides, then re-run ./install.sh." >&2
+    fi
   else
     echo "install.sh: pip could not install the requirements — see the error above." >&2
   fi
@@ -200,7 +255,13 @@ print(v.remedy or "")
   if ! command -v wmctrl >/dev/null 2>&1; then
     echo
     echo "Note: wmctrl is not installed (optional). The engine uses it to count open windows for Alt+Tab;"
-    echo "      without it the count falls back to 5. Install it with:  sudo apt install wmctrl"
+    wmctrl_line="$(pkg_install_command "$PKG_MANAGER" wmctrl || true)"
+    if [[ -n "$wmctrl_line" ]]; then
+      echo "      without it the count falls back to 5. Install it with:  $wmctrl_line"
+    else
+      echo "      without it the count falls back to 5. The package is called wmctrl on every distribution"
+      echo "      that carries it."
+    fi
   fi
   cat <<'EOF'
 
