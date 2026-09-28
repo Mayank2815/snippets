@@ -10,3 +10,8 @@
 - **2026-09-28.** The default `proxy_read_timeout` of 60 s is too short for Task Notif's
   dry-run preview, which scans every task in the workspace. It is raised to 180 s for that
   location only.
+- **2026-09-28.** An engine started by the old Express bridge (before the extraction) can
+  keep running for days: it answers `/status`, so a plain probe says "idle", but it has no
+  console page, so the iframe shows a bare browser error. The tab now also fetches `/` and,
+  when that fails, says an older engine is running and gives the `kill $(lsof ...)` command.
+  Seen live on the first verification: PID from 2026-09-27 still held 4320.

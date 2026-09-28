@@ -10,3 +10,4 @@
 | Health | `curl http://127.0.0.1:4300/healthz` on the VM |
 | Test an nginx edit | `docker compose up --build` in `tools/workbench` next to running tool containers |
 | Engine probe URL | `http://127.0.0.1:4320/status` on the viewer's Mac |
+| Test against an engine on another port | open `http://localhost:4300/?engine=http://127.0.0.1:4325` (loopback only) |
