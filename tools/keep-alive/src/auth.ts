@@ -15,7 +15,8 @@ export function basicAuth(password: string) {
     const header = req.headers.authorization ?? '';
     const [scheme, encoded] = header.split(' ');
 
-    if (scheme === 'Basic' && encoded) {
+    // Scheme names are case-insensitive (RFC 7235); curl and browsers send "Basic", but not every client does.
+    if (scheme?.toLowerCase() === 'basic' && encoded) {
       const supplied = Buffer.from(Buffer.from(encoded, 'base64').toString('utf8').split(':').slice(1).join(':'));
       // Constant-time so a wrong password cannot be guessed a character at a time.
       if (supplied.length === expected.length && timingSafeEqual(supplied, expected)) {

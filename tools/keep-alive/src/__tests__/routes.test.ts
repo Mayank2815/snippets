@@ -41,6 +41,13 @@ test('GET /api/keeper starts empty, with the settings the schema defaults to', a
 
 test('POST /api/keeper/instances adds by URL; a bad URL is a 400 and not a crash', async () => {
   assert.equal((await api('/keeper/instances', { method: 'POST', body: JSON.stringify({ url: 'not a url' }) })).status, 400);
+  // Anything the keeper would fetch and then POST to must be http(s). file: used to slip past
+  // z.string().url(), produce an empty slug and come back as a 500 with a ZodError body.
+  for (const url of ['file:///etc/passwd', 'ftp://client-9.qa.example.cloud/', 'gopher://x']) {
+    const bad = await api('/keeper/instances', { method: 'POST', body: JSON.stringify({ url }) });
+    assert.equal(bad.status, 400, url);
+    assert.equal(bad.body.error, 'enter a full URL, starting with https://', url);
+  }
   const { status, body } = await api('/keeper/instances', { method: 'POST', body: JSON.stringify({ url: URL_A, label: 'QA9C' }) });
   assert.equal(status, 200);
   assert.equal(body.instances.length, 1);
@@ -65,10 +72,33 @@ test('start, check and stop each answer with the instance and the whole list', a
   assert.equal(stopped.body.instance.keeping, false);
 });
 
+test('Start refuses hours outside the schema bounds instead of crashing the process', async () => {
+  // JSON.parse turns 1e999 into Infinity; new Date(now + Infinity).toISOString() throws,
+  // and an async Express 4 handler turns that into an unhandled rejection — the process died.
+  const infinite = await api(`/keeper/instances/${ID_A}/start`, { method: 'POST', body: '{"hours":1e999}' });
+  assert.equal(infinite.status, 400);
+  assert.equal(infinite.body.error, 'invalid hours');
+  const huge = await api(`/keeper/instances/${ID_A}/start`, { method: 'POST', body: JSON.stringify({ hours: 100000 }) });
+  assert.equal(huge.status, 400, 'a finite value over the maximum is refused too');
+  assert.equal((await api(`/keeper/instances/${ID_A}/start`, { method: 'POST', body: JSON.stringify({ hours: 'eight' }) })).status, 400);
+
+  const alive = await api('/keeper');
+  assert.equal(alive.status, 200, 'the server is still answering afterwards');
+  assert.equal(alive.body.instances[0].keeping, false, 'a refused Start does not keep the instance');
+
+  const ok = await api(`/keeper/instances/${ID_A}/start`, { method: 'POST', body: JSON.stringify({ hours: 1 }) });
+  assert.equal(ok.status, 200, 'an in-range value still works');
+  assert.equal(ok.body.instance.keeping, true);
+  await api(`/keeper/instances/${ID_A}/stop`, { method: 'POST' });
+});
+
 test('an unknown id is a 404 on every per-instance route', async () => {
   for (const action of ['start', 'stop', 'check']) {
     assert.equal((await api(`/keeper/instances/nope/${action}`, { method: 'POST', body: '{}' })).status, 404, action);
   }
+  const gone = await api('/keeper/instances/nope', { method: 'DELETE' });
+  assert.equal(gone.status, 404, 'delete of an unknown id, the same as the other per-instance routes');
+  assert.equal(gone.body.error, 'no such instance');
 });
 
 test('PUT /api/keeper changes only the settings it is given, and refuses bad ones', async () => {
@@ -76,14 +106,22 @@ test('PUT /api/keeper changes only the settings it is given, and refuses bad one
   assert.equal(ok.status, 200);
   assert.equal(ok.body.pingMinutes, 3);
   assert.equal(ok.body.hours, 8, 'untouched settings keep their value');
+  assert.equal(ok.body.activityPath, '/rest/api/users/isMySessionActive', 'a patch with only pingMinutes leaves activityPath alone');
   assert.equal(ok.body.instances.length, 1, 'the list is not part of the settings and is left alone');
 
   assert.equal((await api('/keeper', { method: 'PUT', body: JSON.stringify({ pingMinutes: 99 }) })).status, 400);
   assert.equal((await api('/keeper', { method: 'PUT', body: JSON.stringify({ activityPath: 'no-leading-slash' }) })).status, 400);
 });
 
+test('an unmatched /api path is a JSON 404, not the page', async () => {
+  const { status, body } = await api('/typo');
+  assert.equal(status, 404);
+  assert.deepEqual(body, { error: 'not found' });
+});
+
 test('DELETE /api/keeper/instances/:id takes it off the list', async () => {
   const { status, body } = await api(`/keeper/instances/${ID_A}`, { method: 'DELETE' });
   assert.equal(status, 200);
   assert.deepEqual(body.instances, []);
+  assert.equal((await api(`/keeper/instances/${ID_A}`, { method: 'DELETE' })).status, 404, 'deleting it again finds nothing');
 });

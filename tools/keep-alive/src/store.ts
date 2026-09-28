@@ -26,20 +26,30 @@ function write(data: KeepAlive): void {
 
 /**
  * Until 28 September 2026 the kept list lived inside task-notif's store.json, under
- * config.keepAlive. On a start where the list here is empty, if LEGACY_TASK_NOTIF_STORE
- * names that file, the block is copied in so nobody has to re-add every instance by hand.
- * Once copied the list is no longer empty, so it is a one-off: later starts skip it, and
- * the env var can be dropped. task-notif's copy is never modified — only read.
+ * config.keepAlive. If LEGACY_TASK_NOTIF_STORE names a copy of that file and the import
+ * has never run here (`importedAt` is null), the instances are copied in so nobody has to
+ * re-add them by hand. Only the instances: the three settings stay whatever this service
+ * already has, so an operator's tuning is not overwritten. `importedAt` is then recorded,
+ * and that is what makes it a one-off — the guard used to be "the list is empty", which
+ * refilled a list the user had deliberately emptied. The legacy file is only read.
+ *
+ * The file must be a snapshot taken before the new task-notif started: task-notif's
+ * schema strips the keepAlive key and every one of its writes persists the stripped
+ * object, so the live store.json loses the block within hours. deploy/deploy.sh takes
+ * that snapshot before the stack restarts.
  */
 function importLegacy(current: KeepAlive): KeepAlive {
   const legacyPath = process.env.LEGACY_TASK_NOTIF_STORE?.trim();
-  if (!legacyPath || current.instances.length > 0) return current;
+  if (!legacyPath || current.importedAt !== null) return current;
 
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(legacyPath, 'utf8'));
   } catch (err) {
-    console.warn(`[store] LEGACY_TASK_NOTIF_STORE (${legacyPath}) could not be read: ${(err as Error).message}`);
+    // A missing file is the normal case on a host that never ran task-notif (the deploy
+    // sets the variable unconditionally); anything else deserves a warning.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') console.log(`[store] no legacy store at ${legacyPath}; nothing to import`);
+    else console.warn(`[store] LEGACY_TASK_NOTIF_STORE (${legacyPath}) could not be read: ${(err as Error).message}`);
     return current;
   }
   // task-notif kept it at config.keepAlive; a bare keepAlive at the top level is accepted too.
@@ -50,13 +60,13 @@ function importLegacy(current: KeepAlive): KeepAlive {
     console.warn(`[store] ${legacyPath} has no usable keepAlive block; nothing imported`);
     return current;
   }
-  if (parsed.data.instances.length === 0) {
-    console.log(`[store] ${legacyPath} has no kept instances; nothing to import`);
-    return current;
-  }
-  write(parsed.data);
-  console.log(`[store] imported ${parsed.data.instances.length} instance(s) and settings from ${legacyPath} into ${filePath}`);
-  return parsed.data;
+  // Current rows win on an id clash: a store that predates `importedAt` may already hold them.
+  const known = new Set(current.instances.map((i) => i.id));
+  const added = parsed.data.instances.filter((i) => !known.has(i.id));
+  const next: KeepAlive = { ...current, instances: [...current.instances, ...added], importedAt: new Date().toISOString() };
+  write(next);
+  console.log(`[store] imported ${added.length} instance(s) from ${legacyPath} into ${filePath}; settings left as they were`);
+  return next;
 }
 
 let cache: KeepAlive | null = null;

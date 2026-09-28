@@ -69,9 +69,10 @@ the wrapper could not be parsed), the row says so rather than guessing.
 ## State: what persists and what does not
 
 - **Persisted** (`keep-alive.json`): the list — `id`, `url`, `label`, `keepUntil`, the
-  learned `app`, `autoStart` — and the three settings `pingMinutes`, `hours`,
-  `activityPath`. Written on every change via temp file + rename, so a crash mid-write
-  cannot truncate it. A corrupt file falls back to defaults and is left in place.
+  learned `app`, `autoStart` — the three settings `pingMinutes`, `hours`, `activityPath`,
+  and `importedAt` (when the one-off import ran, or null). Written on every change via temp
+  file + rename, so a crash mid-write cannot truncate it. A corrupt file falls back to
+  defaults and is left in place.
 - **In memory** (`Runtime` per instance): last ping time, state, detail, last Start time
   and result, the learned API base. Lost on restart; the next tick pings everything kept.
 
@@ -82,22 +83,35 @@ row.
 ## The one-off import
 
 Until 28 September 2026 all of this lived under `config.keepAlive` in task-notif's
-`store.json`. On a start where this service's list is empty, if `LEGACY_TASK_NOTIF_STORE`
-names that file, the block is parsed with the same schema and written here. task-notif's
-file is only read. Once the list is non-empty the import never runs again.
+`store.json`. On a start where `importedAt` is still null, if `LEGACY_TASK_NOTIF_STORE`
+names a snapshot of that file, the block is parsed with the same schema and its
+**instances** are added to the list here (rows already present win on an id clash); the
+settings are left as they are, and `importedAt` is written. The file is only read. Once
+`importedAt` is set the import never runs again, however empty the list becomes.
+
+The snapshot matters: the new task-notif's schema strips the `keepAlive` key and every
+write persists the stripped object, so the live `store.json` loses the block on task-notif's
+next write. `deploy/deploy.sh` copies it aside before the stack restarts.
 
 ## The page
 
 `ui/src/KeepAlivePanel.tsx` re-reads `api/keeper` every fifteen seconds so a starting
 instance is seen to come up. Every call is a *relative* URL and Vite's `base` is `'./'`, so
 the built page works under a reverse-proxy path prefix. The Express server serves
-`ui/dist` when it exists and falls back to `index.html` for any other path.
+`ui/dist` when it exists and falls back to `index.html` for any other path — except under
+`/api`, where the router ends in a JSON 404 so a mistyped endpoint is not answered with the
+page and a 200.
 
 ## Boundaries
 
 - `/healthz` is registered before Basic auth so a health check with no credentials
   cannot be mistaken for a dead service.
+- Only `http(s)` URLs can be added, and a management API base scraped from a maintenance
+  page is used only if it is `http(s)` too. The keeper fetches and POSTs on behalf of
+  whoever can reach the dashboard, which is why the port stays on loopback.
 - The keeper is started only inside `listen`'s callback: a port clash exits before any
-  instance is pinged, and `SIGINT`/`SIGTERM` stop the loop before exiting.
+  instance is pinged. `SIGINT`/`SIGTERM` stop the loop, let in-flight responses finish
+  (`server.close`), and force the exit after five seconds — inside Docker's ten-second
+  SIGKILL window.
 - The router does not own the keeper — the server does — so tests can hand it one with a
   fake `fetch`.

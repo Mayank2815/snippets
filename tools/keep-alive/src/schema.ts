@@ -39,6 +39,12 @@ export const KeepAliveSchema = z.object({
    * path is one the app answers itself, fetched with a cache-buster.
    */
   activityPath: z.string().default('/rest/api/users/isMySessionActive'),
+  /**
+   * When the one-off import from task-notif's store ran (ISO instant), or null if it never
+   * has. The import is guarded on this, not on "the list is empty": a list the user
+   * deliberately emptied must not be refilled on the next restart.
+   */
+  importedAt: z.string().nullable().default(null),
 });
 
 export type KeepAlive = z.infer<typeof KeepAliveSchema>;
