@@ -53,7 +53,7 @@ Only the tokens need a shell. Everything else is done in the dashboard.
 
 ```bash
 cp .env.example .env      # add TEAMWORK_API_TOKEN and SLACK_BOT_TOKEN
-docker compose up -d      # or ./scripts/deploy.sh user@host
+docker compose up -d      # or, for the team VM, ../../deploy/deploy.sh user@host
 ssh -N -L 4310:127.0.0.1:4310 user@host   # if remote
 ```
 
@@ -109,7 +109,7 @@ reminder is due.
 **On an always-on host (recommended).** A laptop is asleep at 09:00 more often than not.
 
 ```bash
-./scripts/deploy.sh user@your-host          # syncs, builds, restarts, waits for health
+../../deploy/deploy.sh user@your-host       # syncs every VM tool, builds, restarts, waits for health
 ssh -N -L 4310:127.0.0.1:4310 user@your-host  # then open http://localhost:4310
 ```
 
@@ -158,7 +158,7 @@ region.
 
 ```bash
 ./scripts/provision-host.sh ubuntu@<public-ip>   # installs Docker, adds swap
-./scripts/deploy.sh         ubuntu@<public-ip>   # builds, starts, waits for health
+../../deploy/deploy.sh      ubuntu@<public-ip>   # builds, starts, waits for health
 ssh -N -L 4310:127.0.0.1:4310 ubuntu@<public-ip> # then open http://localhost:4310
 ```
 
@@ -315,9 +315,10 @@ a root-cause analysis. Adjust `DONE_MARKERS` and `BLOCKER_MARKERS` in `src/diges
 
 **What it deliberately does not do** is invent facts. Every section of the digest is built
 from Teamwork and Slack data by rules, not by a model. The one optional exception is the
-stand-up summary: with `GEMINI_API_KEY` set, Gemini turns those facts into a few sentences
-you can read out (`src/llm/standup.ts`); without the key nothing is generated and the digest
-is facts only.
+stand-up summary at the top of the digest. With `GEMINI_API_KEY` set and the stand-up summary
+switched on in the dashboard, Gemini phrases those facts as a few sentences you can read out;
+otherwise the same facts are assembled into a summary locally, with no model involved
+(`writeStandupSummary` and `buildFactualSummary` in `src/llm/`).
 
 ## Slack mentions
 

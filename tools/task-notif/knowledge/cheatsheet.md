@@ -19,7 +19,7 @@ Run everything from `tools/task-notif/`.
 | `npm run send-now` | Send the reminder now |
 | `npm run send-now digest` | Send the digest now |
 | `npm run probe` | Dump live Teamwork API shapes |
-| `npm run deploy -- user@host` | Same as `./scripts/deploy.sh user@host` |
+| `npm run deploy -- user@host` | Prints a pointer to `deploy/deploy.sh` at the repo root, which deploys the whole VM stack |
 
 ## Ports
 
@@ -79,7 +79,7 @@ VM with Docker (the normal way):
 
 ```bash
 ./scripts/provision-host.sh ubuntu@<ip>          # once: Docker, rsync, 2 GB swap
-./scripts/deploy.sh ubuntu@<ip>                  # rsync to /opt/task-notif, build, restart, wait for healthy
+../../deploy/deploy.sh ubuntu@<ip>               # rsync every VM tool to /opt/snippets, build, restart, wait for healthy
 ssh -N -L 4310:127.0.0.1:4310 ubuntu@<ip>        # then open http://localhost:4310
 ```
 

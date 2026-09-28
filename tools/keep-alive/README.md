@@ -65,8 +65,12 @@ the first tick, which is what you would want anyway.
 
 ## Deploying
 
-Docker Compose on the same VM as task-notif. The image builds both stages; `data/` is a
-volume so the kept list survives redeploys.
+On the team VM this tool is one service of the stack in `deploy/docker-compose.yml` at the
+repo root; `./deploy/deploy.sh user@host` syncs it, builds it and restarts everything, and
+the workbench reaches it as `/keep-alive/`. The commands below run it on its own, for
+example on a personal box. The image builds both stages; `data/` is a volume so the kept
+list survives redeploys. Do not run the standalone file on the VM next to the stack: both
+name their container `keep-alive`.
 
 ```bash
 cd tools/keep-alive

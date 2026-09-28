@@ -1,12 +1,19 @@
-# Standalone run of the workbench only. It expects task-notif and keep-alive to be
-# reachable by those names on the same Docker network, which is what deploy/docker-compose.yml
-# at the repo root sets up; use that file on the VM.
+# Standalone run of the workbench only, for testing an nginx change. It joins the stack's
+# network (the stack in deploy/ must already be up) so task-notif and keep-alive resolve.
+name: snippets-workbench-dev
+
 services:
   workbench:
     build: .
     image: snippets-workbench:latest
-    container_name: snippets-workbench
+    container_name: snippets-workbench-dev
     restart: unless-stopped
     ports:
       # Loopback only: the tools behind it have at most basic auth. Open it with an SSH tunnel.
-      - "127.0.0.1:4300:80"
+      # 4301 so it can run next to the stack's own workbench on 4300.
+      - "127.0.0.1:4301:80"
+
+networks:
+  default:
+    name: snippets_default
+    external: true

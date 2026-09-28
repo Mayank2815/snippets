@@ -4,6 +4,10 @@
 # Each tool also has its own docker-compose.yml for running it alone; this file exists
 # so the workbench's nginx can reach the tools by name on one network, and so one
 # command restarts everything after a deploy.
+# A fixed project name: the network is then snippets_default regardless of the folder the
+# file is run from, so the standalone tools/workbench compose file can join it.
+name: snippets
+
 services:
   task-notif:
     build: ../tools/task-notif
