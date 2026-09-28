@@ -2,7 +2,8 @@ services:
   - type: web
     name: task-notif
     runtime: docker
-    dockerfilePath: ./Dockerfile
+    dockerContext: ./tools/task-notif
+    dockerfilePath: ./tools/task-notif/Dockerfile
     # Free instances sleep after 15 minutes idle. The scheduler must be awake at
     # 09:00 with nobody making requests, so a paid always-on plan is required.
     plan: starter

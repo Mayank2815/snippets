@@ -1,10 +1,13 @@
-node_modules/
-dist/
-.env
+# Every tool under tools/ keeps its own dependencies, build output, secrets and state.
+**/node_modules/
+**/dist/
+**/.venv/
+**/__pycache__/
+**/*.tsbuildinfo
+**/.env
+**/data/
+**/logs/
+*.log
 *.sqlite
 *.sqlite-journal
-data/
 .DS_Store
-dashboard/dist/
-logs/
-*.tsbuildinfo
