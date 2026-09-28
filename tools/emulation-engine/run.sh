@@ -15,6 +15,7 @@ for arg in "$@"; do
   case "$arg" in
     --no-open) OPEN_BROWSER=0 ;;
     -h|--help) echo "usage: ./run.sh [--no-open]"; exit 0 ;;
+    # WHY exit 2: the conventional "bad usage" code, distinct from the 1 used for runtime failures below.
     *) echo "run.sh: unknown option '$arg' (only --no-open is supported)" >&2; exit 2 ;;
   esac
 done
@@ -24,8 +25,12 @@ if [[ ! -x .venv/bin/python ]]; then
   exit 1
 fi
 
+# WHY 4320: must match DEFAULT_PORT in engine/mac_engine.py (one above task-notif's 4310).
 PORT="${PORT:-4320}"
 URL="http://127.0.0.1:${PORT}"
+# WHY -m 1 on every curl: the engine is on loopback and answers in microseconds, so
+# one second is already a generous ceiling; a longer one would only stall the loop.
+CURL_TIMEOUT=1
 
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "run.sh: port $PORT is already in use — another engine (or something else) is listening." >&2
@@ -42,6 +47,8 @@ set -u
 PORT="$PORT" python engine/mac_engine.py &
 ENGINE_PID=$!
 
+# Sends SIGTERM; the engine handles it like Ctrl-C (stops the loop, releases the
+# Command key, prints "Shutdown complete.") and `wait` lets that finish.
 stop_engine() {
   if kill -0 "$ENGINE_PID" 2>/dev/null; then
     kill "$ENGINE_PID" 2>/dev/null || true
@@ -53,7 +60,7 @@ trap stop_engine EXIT INT TERM
 # WHY 50 x 0.2 s: ten seconds is far more than the engine needs to bind, so a
 # miss here means it crashed (its traceback is printed above), not that it is slow.
 for _ in $(seq 1 50); do
-  if curl -s -m 1 -o /dev/null "$URL/status"; then
+  if curl -s -m "$CURL_TIMEOUT" -o /dev/null "$URL/status"; then
     break
   fi
   if ! kill -0 "$ENGINE_PID" 2>/dev/null; then
@@ -63,7 +70,7 @@ for _ in $(seq 1 50); do
   sleep 0.2
 done
 
-if ! curl -s -m 1 -o /dev/null "$URL/status"; then
+if ! curl -s -m "$CURL_TIMEOUT" -o /dev/null "$URL/status"; then
   echo "run.sh: the engine did not answer on $URL/status within 10 s." >&2
   exit 1
 fi

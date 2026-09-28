@@ -3,9 +3,12 @@
 A tiny HTTP server on 127.0.0.1:4320 exposes the engine:
 
     GET  /         the control console (console/index.html, next to this folder)
-    GET  /status   {"status": "IDLE" | "RUNNING"}
+    GET  /status   {"status": "IDLE" | "RUNNING" | "STOPPING"}
     POST /start    start the emulation loop in a background thread
     POST /stop     ask the loop to stop after its current step
+
+POST /start and /stop must carry the header `X-Engine-Control: 1` and, when
+sent by a browser, come from a page served on this Mac (see ALLOWED_ORIGIN_RE).
 
 Run it with ./run.sh (or `.venv/bin/python engine/mac_engine.py`). It needs
 pyobjc's Quartz bindings (see requirements.txt / install.sh) and the terminal
@@ -15,6 +18,8 @@ Accessibility, otherwise macOS silently drops every posted event.
 
 import sys
 import os
+import re
+import signal
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
@@ -22,6 +27,12 @@ import subprocess
 import time
 import random
 import math
+
+# WHY line buffering: run.sh starts the engine in the background and people
+# redirect its output to a log; with the default block buffering nothing shows
+# up in that log until the process exits, so "[System Shift]" lines and the
+# error messages below arrive hours late. Done before any print in this file.
+sys.stdout.reconfigure(line_buffering=True)
 
 
 def _import_quartz():
@@ -80,9 +91,32 @@ PORT = int(os.environ.get("PORT", DEFAULT_PORT))
 # The console page lives in ../console/index.html relative to this script.
 CONSOLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'console', 'index.html')
 
-is_running = False
+# WHY a per-worker Event instead of a shared boolean: /stop used to clear one
+# global flag while the worker might be inside its 9.5-12.5 s end-of-cycle
+# sleep; a /start in that window set the flag back to True and started a second
+# thread, and the old one woke up, saw True and carried on — two loops at once.
+# Each worker now owns the Event it was started with, so setting it stops that
+# worker and nothing can ever revive it. Event.is_set() is atomic, so the worker
+# reads it without the lock; thread_lock only guards the start/stop transitions.
+stop_event = threading.Event()
 engine_thread = None
 thread_lock = threading.Lock()
+
+# WHY an allow-list instead of '*': binding to loopback keeps other machines
+# out, but not the user's own browser — with '*' any web page they visited
+# could POST /start from JavaScript and drive their mouse. Only pages served
+# from this Mac (the console, or a tool on another local port) are reflected;
+# every other Origin gets no CORS headers at all, so the browser blocks it.
+ALLOWED_ORIGIN_RE = re.compile(r'^http://(127\.0\.0\.1|localhost)(:\d{1,5})?$')
+# WHY a custom header on /start and /stop: a plain POST is a "simple request"
+# that browsers send without a preflight even cross-origin; requiring a custom
+# header forces the preflight, which fails for any origin not in the allow-list.
+CONTROL_HEADER = 'X-Engine-Control'
+
+# WHY 2 s: long enough for the worker to finish the event it is in the middle
+# of (at most one Cmd+Tab sequence, ~0.6 s) before the process exits, short
+# enough that ./run.sh's Ctrl-C still feels immediate.
+SHUTDOWN_JOIN_SECONDS = 2
 
 # --- FIXED ABSOLUTE TELEMETRY INJECTION KEYBOARD MATRIX ---
 # Strictly bound to pure navigation safe arrow keys as requested
@@ -136,7 +170,10 @@ def get_total_visible_apps_count():
     """Queries macOS desktop server to dynamically get the count of all open active windows apps"""
     script = 'tell application "System Events" to get count of (every process whose background only is false)'
     try:
-        output = subprocess.check_output(["osascript", "-e", script]).decode().strip()
+        # WHY timeout=5: the first call can pop macOS's Automation permission
+        # dialog, which blocks osascript until someone clicks; without a timeout
+        # the worker would hang there and /stop could never end the loop.
+        output = subprocess.check_output(["osascript", "-e", script], timeout=5).decode().strip()
         # WHY 5: if System Events refuses (no Automation permission) or answers
         # oddly, assume five visible apps so Cmd+Tab still cycles a plausible depth.
         return int(output) if output.isdigit() else 5
@@ -194,13 +231,13 @@ def hardware_browser_tab_switch():
     CGEventSetFlags(up, combined_flags)
     CGEventPost(kCGHIDEventTap, up)
 
-def simulate_vertical_scrolling():
+def simulate_vertical_scrolling(stop):
     direction = random.choice([-1, 1])
     # WHY 4-8 lines: a short flick of a scroll wheel, not a page jump.
     scroll_lines = random.randint(4, 8)
     print(f"  [Scroll Active] Generating smooth vertical scrolling. Lines: {scroll_lines}")
     for _ in range(scroll_lines):
-        if not is_running: break
+        if stop.is_set(): break
         scroll_event = CGEventCreateScrollWheelEvent(None, kCGScrollEventUnitLine, 1, direction)
         CGEventPost(kCGHIDEventTap, scroll_event)
         # WHY 0.15-0.30 s: the cadence of wheel notches; a tighter stream would
@@ -212,7 +249,7 @@ def bezier_point(p0_x, p0_y, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y, t):
     y = (1-t)**3 * p0_y + 3*(1-t)**2 * t * p1_y + 3*(1-t) * t**2 * p2_y + t**3 * p3_y
     return x, y
 
-def move_humanlike_adaptive(start_x, start_y, end_x, end_y):
+def move_humanlike_adaptive(start_x, start_y, end_x, end_y, stop):
     distance = math.hypot(end_x - start_x, end_y - start_y)
     # WHY 18..40 steps at one per 16 px: short hops still get enough samples to
     # show a curve, long moves are capped so they do not flood the event tap.
@@ -229,7 +266,7 @@ def move_humanlike_adaptive(start_x, start_y, end_x, end_y):
     p2_y = start_y + (end_y - start_y) * 0.75 + random.uniform(-deviation, deviation)
 
     for i in range(steps + 1):
-        if not is_running: break
+        if stop.is_set(): break
         t = i / float(steps)
         # WHY 10t^3 - 15t^4 + 6t^5: the quintic smoothstep, so the pointer starts
         # and stops with zero velocity like a hand does.
@@ -239,13 +276,13 @@ def move_humanlike_adaptive(start_x, start_y, end_x, end_y):
         # WHY 5-10 ms between samples: 100-200 Hz, the report rate of a USB mouse.
         time.sleep(random.uniform(0.005, 0.010))
 
-def loop_worker():
-    global is_running
+def loop_worker(stop):
+    """The emulation loop. `stop` is this worker's own Event; /stop sets it."""
     print("\n=====================================================")
     print("[Core Engine] Active Target-Stabilized Emulation Initiated.")
     print("=====================================================")
 
-    while is_running:
+    while not stop.is_set():
         curr_x, curr_y = get_mouse_pos()
         # WHY ±300 px clamped to x 200..1100, y 200..650: a random hop that stays
         # in the middle of a 13" display (1280x800 points), away from the menu
@@ -253,13 +290,13 @@ def loop_worker():
         target_x = max(200, min(curr_x + random.randint(-300, 300), 1100))
         target_y = max(200, min(curr_y + random.randint(-300, 300), 650))
 
-        move_humanlike_adaptive(curr_x, curr_y, target_x, target_y)
+        move_humanlike_adaptive(curr_x, curr_y, target_x, target_y, stop)
 
         # WHY 16-20 strokes at 0.12-0.28 s: a burst of about 3-5 seconds of
         # keyboard activity per cycle.
         strokes = random.randint(16, 20)
         for _ in range(strokes):
-            if not is_running: break
+            if stop.is_set(): break
             # WHY 0.22: roughly one stroke in five is a bare Shift, so the burst
             # is not a pure run of arrow keys.
             if random.random() < 0.22:
@@ -277,7 +314,7 @@ def loop_worker():
         elif 0.30 <= dice < 0.60:
             hardware_browser_tab_switch()
         else:
-            simulate_vertical_scrolling()
+            simulate_vertical_scrolling(stop)
 
         # WHY 0.22: about one cycle in five ends with a click where the pointer
         # already is; 0.04 s settle before and a 0.02 s hold is a light click.
@@ -290,21 +327,61 @@ def loop_worker():
 
         # --- FINAL PERFECT BRACKET TIMING ADJUSTMENT FOR 41% - 44% RE-LOCK ---
         # WHY 9.5-12.5 s: with the 3-5 s of activity above, one cycle lasts
-        # about 13-17 s, which the author calibrated (see test_metrics.py) so
-        # roughly 41-44 % of ten-second windows contain an action.
-        time.sleep(random.uniform(9.5, 12.5))
+        # about 13-17 s, which the author calibrated by hand so roughly 41-44 %
+        # of ten-second windows contain an action. test_metrics.py is the older
+        # model of this cadence, not the source of these numbers; see lessons.md.
+        # WHY stop.wait() and not time.sleep(): /stop wakes the worker at once
+        # instead of leaving it asleep for up to 12.5 s.
+        stop.wait(random.uniform(9.5, 12.5))
+    print("[Core Engine] Emulation loop ended.")
+
+
+def release_command_key():
+    """Post a Command key-up. Called on shutdown in case the worker was killed
+    mid Cmd+Tab: a synthetic modifier that is never released stays held for the
+    whole login session, and every later click and keystroke gets Cmd added."""
+    try:
+        CGEventPost(kCGHIDEventTap, CGEventCreateKeyboardEvent(None, COMMAND_KEY, False))
+    except Exception as err:  # never let a Quartz hiccup block the exit
+        print(f"[Shutdown] could not post Command key-up: {err}")
+
+
+def engine_state():
+    """IDLE, RUNNING or STOPPING. Call with thread_lock held."""
+    if engine_thread is None or not engine_thread.is_alive():
+        return "IDLE"
+    return "STOPPING" if stop_event.is_set() else "RUNNING"
 
 class EngineBridgeHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args): return
 
+    def _origin_allowed(self):
+        """True when the request has no Origin (curl, same-origin GETs in some
+        browsers) or an Origin on the allow-list; False for any other page."""
+        origin = self.headers.get('Origin')
+        return origin is None or ALLOWED_ORIGIN_RE.match(origin) is not None
+
     def _send_cors_headers(self):
-        # WHY CORS on every response: the team workbench page is served from a
-        # VM, but the engine it controls runs on the viewer's own Mac. Without
-        # these headers the browser blocks that cross-origin call to 127.0.0.1.
-        # '*' is safe only because the server binds to loopback (see BIND_HOST).
-        self.send_header('Access-Control-Allow-Origin', '*')
+        # WHY CORS at all: a page on another *local* port (e.g. a dashboard on
+        # 127.0.0.1:4310) may control the engine, and the browser blocks that
+        # cross-origin call unless the engine says it is allowed. The Origin is
+        # reflected only when it is on ALLOWED_ORIGIN_RE; otherwise no CORS
+        # header is sent and the browser refuses the response. Loopback binding
+        # alone is NOT what makes this safe — the user's own browser is on
+        # loopback too, which is exactly the caller the allow-list keeps out.
+        origin = self.headers.get('Origin')
+        if not self._origin_allowed():
+            return
+        if origin is not None:
+            self.send_header('Access-Control-Allow-Origin', origin)
+            # WHY Vary: the answer differs per Origin, so a cache must not
+            # hand one origin's response to another.
+            self.send_header('Vary', 'Origin')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, ' + CONTROL_HEADER)
+        # WHY Allow-Private-Network: Chrome adds a second preflight check when
+        # a public page calls a loopback address and refuses without this.
+        self.send_header('Access-Control-Allow-Private-Network', 'true')
 
     def _send_json(self, payload, status=200):
         body = json.dumps(payload).encode()
@@ -335,42 +412,68 @@ class EngineBridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        global is_running
         path = self.path.split('?', 1)[0]
         if path == '/status':
-            self._send_json({"status": "RUNNING" if is_running else "IDLE"})
+            with thread_lock:
+                state = engine_state()
+            self._send_json({"status": state})
         elif path in ('/', '/index.html'):
             self._send_console()
         else:
             self._send_json({"error": "not found"}, status=404)
 
     def do_POST(self):
-        global is_running, engine_thread
-        response_data = {"success": True}
+        global stop_event, engine_thread
+        path = self.path.split('?', 1)[0]
 
-        if self.path == '/start':
-            with thread_lock:
-                if not is_running:
-                    is_running = True
-                    engine_thread = threading.Thread(target=loop_worker, daemon=True)
-                    engine_thread.start()
-                    response_data["message"] = "Stabilized Engine Activated"
-                else: response_data = {"success": True, "message": "Engine confirmed running"}
-
-        elif self.path =='/stop':
-            with thread_lock:
-                if is_running:
-                    is_running = False
-                    response_data["message"] = "Stabilized Engine Deactivated"
-                else: response_data = {"success": False, "message": "Already idle"}
-
-        else:
+        if path not in ('/start', '/stop'):
             self._send_json({"success": False, "error": "not found"}, status=404)
             return
+        # WHY 403 for both checks: the request reached a real endpoint but the
+        # caller is not one we trust — a page off the allow-list, or a plain
+        # cross-site POST that skipped the preflight. 400 would suggest a
+        # malformed request the caller should fix and retry; it should not.
+        if not self._origin_allowed():
+            self._send_json({"success": False, "message": "origin not allowed"}, status=403)
+            return
+        if self.headers.get(CONTROL_HEADER) != '1':
+            self._send_json({"success": False, "message": f"missing {CONTROL_HEADER}: 1 header"}, status=403)
+            return
 
-        self._send_json(response_data)
+        with thread_lock:
+            state = engine_state()
+            if path == '/start':
+                if state == "RUNNING":
+                    response = {"success": True, "message": "Engine confirmed running"}, 200
+                elif state == "STOPPING":
+                    # The previous worker is still finishing its current step;
+                    # starting now would run two loops (see stop_event's WHY).
+                    response = {"success": False, "message": "stopping, try again in a moment"}, 409
+                else:
+                    stop_event = threading.Event()
+                    engine_thread = threading.Thread(target=loop_worker, args=(stop_event,), daemon=True)
+                    engine_thread.start()
+                    response = {"success": True, "message": "Stabilized Engine Activated"}, 200
+            else:  # /stop
+                if state == "RUNNING":
+                    stop_event.set()
+                    response = {"success": True, "message": "Stabilized Engine Deactivated"}, 200
+                elif state == "STOPPING":
+                    response = {"success": True, "message": "Already stopping"}, 200
+                else:
+                    response = {"success": False, "message": "Already idle"}, 200
+
+        payload, status = response
+        self._send_json(payload, status=status)
+
+
+def _on_sigterm(signum, frame):
+    # WHY raise KeyboardInterrupt: run.sh's trap sends SIGTERM; funnelling it
+    # into the same path as Ctrl-C gives one shutdown sequence for both.
+    raise KeyboardInterrupt
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, _on_sigterm)
     server = HTTPServer((BIND_HOST, PORT), EngineBridgeHandler)
     print("=========================================================")
     print(f"🚀 TARGET-CALIBRATED ENGINE V20.0 ON PORT {PORT}")
@@ -379,5 +482,16 @@ if __name__ == "__main__":
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        is_running = False
-        print("\nShutdown complete.")
+        pass
+    finally:
+        server.server_close()
+        with thread_lock:
+            stop_event.set()
+            worker = engine_thread
+        if worker is not None and worker.is_alive():
+            print("\n[Shutdown] waiting for the emulation loop to finish its step...")
+            worker.join(SHUTDOWN_JOIN_SECONDS)
+        # Always, even when no loop ran: it is one harmless event and it is
+        # the only thing standing between a killed worker and a stuck Cmd key.
+        release_command_key()
+        print("Shutdown complete.")

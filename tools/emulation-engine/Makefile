@@ -5,6 +5,9 @@
 # third-party imports, so the system python3 is fine before that.
 PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 DATE   := $(shell date +%Y%m%d)
+# The folder this Makefile lives in, whatever it was renamed to; `bundle` zips it
+# from the parent directory so the archive unpacks into a folder of the same name.
+TOOL   := $(notdir $(CURDIR))
 BUNDLE := emulation-engine-$(DATE).zip
 
 help:
@@ -24,6 +27,6 @@ test:
 
 bundle:
 	rm -f "$(BUNDLE)"
-	cd .. && zip -r "emulation-engine/$(BUNDLE)" emulation-engine \
-	  -x 'emulation-engine/.venv/*' 'emulation-engine/*.zip' '*/__pycache__/*' '*.pyc' '*/.DS_Store'
+	cd .. && zip -r "$(TOOL)/$(BUNDLE)" "$(TOOL)" \
+	  -x "$(TOOL)/.venv/*" "$(TOOL)/*.zip" '*/__pycache__/*' '*.pyc' '*/.DS_Store'
 	@echo "Wrote $(BUNDLE) — send it to anyone without repo access; they unzip, then ./install.sh and ./run.sh"

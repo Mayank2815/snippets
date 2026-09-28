@@ -122,8 +122,11 @@
   var busy = false;
 
   function render(state, detail) {
-    dot.className = 'dot ' + (state === 'RUNNING' ? 'ok' : state === 'IDLE' ? 'warn' : 'bad');
-    statusText.textContent = state;
+    // STOPPING: the old loop is finishing its current step. Both buttons stay off —
+    // the engine answers 409 to /start until that thread has really ended.
+    var amber = state === 'IDLE' || state === 'STOPPING';
+    dot.className = 'dot ' + (state === 'RUNNING' ? 'ok' : amber ? 'warn' : 'bad');
+    statusText.textContent = state === 'STOPPING' ? 'Stopping…' : state;
     statusDetail.textContent = detail;
     startBtn.disabled = busy || state !== 'IDLE';
     stopBtn.disabled = busy || state !== 'RUNNING';
@@ -142,6 +145,7 @@
       })
       .then(function (data) {
         if (data.status === 'RUNNING') render('RUNNING', 'Emulation loop is active — the pointer and keys are being driven.');
+        else if (data.status === 'STOPPING') render('STOPPING', 'Finishing the current step — Start comes back in a moment.');
         else render('IDLE', 'Engine is up and waiting.');
       })
       .catch(function (err) {
@@ -154,7 +158,9 @@
     busy = true;
     startBtn.disabled = stopBtn.disabled = true;
     setError('');
-    fetch(base + '/' + action, { method: 'POST' })
+    // X-Engine-Control is required by the engine: a custom header turns the POST
+    // into a preflighted request, so a page from any other site cannot send it.
+    fetch(base + '/' + action, { method: 'POST', headers: { 'X-Engine-Control': '1' } })
       .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
       .then(function (out) {
         if (!out.ok || out.data.success === false) {
