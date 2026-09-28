@@ -1,0 +1,18 @@
+services:
+  keep-alive:
+    build: .
+    image: keep-alive:latest
+    container_name: keep-alive
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      # First boot only, together with LEGACY_TASK_NOTIF_STORE=/legacy/store.json in .env:
+      # copies the kept list out of task-notif's store. Read-only, so nothing in this
+      # container can touch task-notif's data. Remove both once the import has happened.
+      # - ../task-notif/data:/legacy:ro
+    ports:
+      # Bound to loopback on purpose: without DASHBOARD_PASSWORD there is no authentication,
+      # so it must not be reachable from the internet. Use an SSH tunnel to open it.
+      # 4311 because task-notif already has 4310 on the same VM.
+      - "127.0.0.1:4311:4311"

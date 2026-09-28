@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { KeepAliveSettings, KeptInstanceView } from '../types.js';
+import type { KeepAliveSettings, KeptInstanceView } from './types.js';
 
+/**
+ * Relative, not "/api/...": the page may be served under a path prefix by a reverse
+ * proxy (e.g. /keep-alive/), and a leading slash would escape it. Vite's base is './'
+ * for the same reason.
+ */
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`/api/keeper${path}`, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) } });
+  const res = await fetch(`api/keeper${path}`, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) } });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
   return body as T;
@@ -78,7 +83,7 @@ export function KeepAlivePanel() {
       {data && data.instances.length === 0 && <p className="muted">No instances yet — add the URL of the dev or QA server you are working on.</p>}
 
       {data?.instances.map((i) => (
-        <div className="recipient" key={i.id} style={{ marginTop: 12, borderColor: i.keeping ? 'var(--accent)' : undefined }}>
+        <div className="instance" key={i.id} style={{ marginTop: 12, borderColor: i.keeping ? 'var(--accent)' : undefined }}>
           <div className="head">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
               <span className={`dot ${i.state ? DOT[i.state] : ''}`} style={{ background: i.state ? undefined : 'var(--border)' }} />
