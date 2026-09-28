@@ -37,9 +37,10 @@ Development servers use the same number plus 1000 where a tool has one
 | `/opt/snippets/tools/<tool>/.env` | Its secrets. Copied separately by the deploy script and never deleted by the sync, so a bad deploy cannot wipe credentials. Mode `0600`. |
 | `/opt/snippets/tools/<tool>/data/` | Its state. Mounted into the container at `/app/data`. Survives redeploys because it is a bind mount, not part of the image. |
 
-One tool never writes another tool's `data/` directory. The single exception is read-only:
-Keep Alive's container gets Task Notif's `data/` mounted at `/legacy` so it can import the
-instance list it used to keep there, once, on its first boot.
+One tool never reads or writes another tool's `data/` directory. The one hand-off is done by
+`deploy.sh`, not by the containers: it copies Task Notif's `store.json` to
+`keep-alive/data/legacy-task-notif-store.json` once, and Keep Alive imports the instance
+list it used to keep there on its first boot.
 
 ## Reaching a VM tool: the SSH tunnel
 

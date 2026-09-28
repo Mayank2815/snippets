@@ -53,9 +53,9 @@
 <header>
   <h1>Snippets</h1>
   <nav role="tablist" aria-label="Tools">
-    <button role="tab" data-tab="task-notif">Task Notif</button>
-    <button role="tab" data-tab="keep-alive">Keep Alive</button>
-    <button role="tab" data-tab="emulation-engine">Emulation Engine</button>
+    <button role="tab" id="tab-task-notif" aria-controls="panel-task-notif" data-tab="task-notif">Task Notif</button>
+    <button role="tab" id="tab-keep-alive" aria-controls="panel-keep-alive" data-tab="keep-alive">Keep Alive</button>
+    <button role="tab" id="tab-emulation-engine" aria-controls="panel-emulation-engine" data-tab="emulation-engine">Emulation Engine</button>
   </nav>
   <div class="spacer"></div>
   <div class="engine-state" id="engine-state" title="The emulation engine runs on your own Mac, not on the server">
@@ -63,27 +63,27 @@
   </div>
 </header>
 <main>
-  <section class="panel" role="tabpanel" data-panel="task-notif">
+  <section class="panel" role="tabpanel" id="panel-task-notif" aria-labelledby="tab-task-notif" data-panel="task-notif">
     <iframe title="Task Notif" data-src="/task-notif/"></iframe>
   </section>
-  <section class="panel" role="tabpanel" data-panel="keep-alive">
+  <section class="panel" role="tabpanel" id="panel-keep-alive" aria-labelledby="tab-keep-alive" data-panel="keep-alive">
     <iframe title="Keep Alive" data-src="/keep-alive/"></iframe>
   </section>
-  <section class="panel" role="tabpanel" data-panel="emulation-engine">
+  <section class="panel" role="tabpanel" id="panel-emulation-engine" aria-labelledby="tab-emulation-engine" data-panel="emulation-engine">
     <div class="notice" id="engine-notice">
       <h2 id="engine-notice-title">The emulation engine is not running on this Mac</h2>
-      <p id="engine-notice-outdated" style="display:none"><strong>An older engine is running on port 4320</strong> that
-         answers status calls but has no console page. Stop it (<code>kill $(lsof -t -nP -iTCP:4320 -sTCP:LISTEN)</code>)
+      <p id="engine-notice-outdated" style="display:none"><strong>An older engine is running on port <span class="engine-port"></span></strong> that
+         answers status calls but has no console page. Stop it (<code>kill $(lsof -t -nP -iTCP:<span class="engine-port"></span> -sTCP:LISTEN)</code>)
          and start the current one with the command below.</p>
       <p>The engine drives the mouse and keyboard of the machine it runs on, so it always runs
-         locally and this page only talks to it at <code>127.0.0.1:4320</code>.</p>
+         locally and this page only talks to it at <code id="engine-host">127.0.0.1:4320</code>.</p>
       <p>Start it from a terminal in the repo:</p>
       <p><code>cd tools/emulation-engine &amp;&amp; ./run.sh --no-open</code></p>
       <p>First time on this Mac: run <code>./install.sh</code> once before that. The README in that
          folder explains the Accessibility permission macOS will ask for.</p>
       <button id="engine-retry">Check again</button>
     </div>
-    <iframe title="Core Emulation Engine Control Console" data-src="http://127.0.0.1:4320/" style="display:none"></iframe>
+    <iframe title="Core Emulation Engine Control Console" style="display:none"></iframe>
   </section>
 </main>
 <script>
@@ -91,21 +91,34 @@
   // The engine lives on the viewer's Mac, never on the server: see the notice text.
   var ENGINE = 'http://127.0.0.1:4320';
   // ?engine=http://127.0.0.1:4325 points the tab at an engine on another port, for testing
-  // a second copy without stopping the one people use.
+  // a second copy without stopping the one people use. Loopback only.
   try {
-    var override = new URLSearchParams(location.search).get('engine');
-    if (override && /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(override)) ENGINE = override;
+    var override = (new URLSearchParams(location.search).get('engine') || '').replace(/\/+$/, '');
+    if (/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(override)) ENGINE = override;
   } catch (e) { /* very old browser; keep the default */ }
-  document.querySelector('[data-panel=emulation-engine] iframe').dataset.src = ENGINE + '/';
   // Two seconds matches the console page's own polling, and is slow enough that a
   // stopped engine does not spam the browser console with failed requests.
   var ENGINE_POLL_MS = 2000;
+  // A local engine answers in milliseconds; 1.5 s is long enough for a busy Mac and short
+  // enough that the header does not sit on "checking…" for long. One timer per request.
+  var ENGINE_TIMEOUT_MS = 1500;
 
   var tabs = Array.prototype.slice.call(document.querySelectorAll('[role=tab]'));
   var panels = Array.prototype.slice.call(document.querySelectorAll('[role=tabpanel]'));
+  var enginePanel = document.querySelector('[data-panel=emulation-engine]');
+  var engineFrame = enginePanel.querySelector('iframe');
+  engineFrame.dataset.src = ENGINE + '/';
+  document.getElementById('engine-host').textContent = ENGINE.replace(/^https?:\/\//, '');
+  Array.prototype.forEach.call(document.querySelectorAll('.engine-port'), function (el) {
+    el.textContent = (ENGINE.match(/:(\d+)$/) || [, '80'])[1];
+  });
 
   function show(name) {
-    tabs.forEach(function (t) { t.setAttribute('aria-selected', String(t.dataset.tab === name)); });
+    tabs.forEach(function (t) {
+      var on = t.dataset.tab === name;
+      t.setAttribute('aria-selected', String(on));
+      t.tabIndex = on ? 0 : -1;
+    });
     panels.forEach(function (p) {
       var active = p.dataset.panel === name;
       p.dataset.active = String(active);
@@ -118,46 +131,78 @@
     if (name === 'emulation-engine') checkEngine();
   }
 
-  tabs.forEach(function (t) { t.addEventListener('click', function () { show(t.dataset.tab); }); });
+  tabs.forEach(function (t, i) {
+    t.addEventListener('click', function () { show(t.dataset.tab); });
+    // The ARIA tab pattern: Left/Right move between tabs, Home/End jump to the ends.
+    t.addEventListener('keydown', function (ev) {
+      var next = ev.key === 'ArrowRight' ? i + 1 : ev.key === 'ArrowLeft' ? i - 1 : ev.key === 'Home' ? 0 : ev.key === 'End' ? tabs.length - 1 : null;
+      if (next === null) return;
+      ev.preventDefault();
+      next = (next + tabs.length) % tabs.length;
+      tabs[next].focus();
+      show(tabs[next].dataset.tab);
+    });
+  });
 
   var dot = document.getElementById('engine-dot');
   var text = document.getElementById('engine-text');
   var notice = document.getElementById('engine-notice');
-  var engineFrame = document.querySelector('[data-panel=emulation-engine] iframe');
+  var outdated = document.getElementById('engine-notice-outdated');
+  var title = document.getElementById('engine-notice-title');
   document.getElementById('engine-retry').addEventListener('click', checkEngine);
 
-  function checkEngine() {
+  function timedFetch(url) {
     var ctrl = typeof AbortController === 'function' ? new AbortController() : null;
-    var timer = ctrl && setTimeout(function () { ctrl.abort(); }, 1500);
-    var outdated = document.getElementById('engine-notice-outdated');
-    var title = document.getElementById('engine-notice-title');
-    function showNotice(isOutdated) {
-      title.textContent = isOutdated ? 'The engine on this Mac is an older version' : 'The emulation engine is not running on this Mac';
-      outdated.style.display = isOutdated ? '' : 'none';
-      notice.style.display = '';
-      engineFrame.style.display = 'none';
-      engineFrame.removeAttribute('src');
-    }
-    fetch(ENGINE + '/status', { mode: 'cors', signal: ctrl && ctrl.signal })
+    var timer = ctrl && setTimeout(function () { ctrl.abort(); }, ENGINE_TIMEOUT_MS);
+    return fetch(url, { mode: 'cors', signal: ctrl && ctrl.signal }).then(
+      function (r) { if (timer) clearTimeout(timer); return r; },
+      function (err) { if (timer) clearTimeout(timer); throw err; }
+    );
+  }
+
+  function showNotice(isOutdated) {
+    title.textContent = isOutdated ? 'The engine on this Mac is an older version' : 'The emulation engine is not running on this Mac';
+    outdated.style.display = isOutdated ? '' : 'none';
+    notice.style.display = '';
+    engineFrame.style.display = 'none';
+    engineFrame.removeAttribute('src');
+  }
+
+  function showConsole() {
+    notice.style.display = 'none';
+    engineFrame.style.display = '';
+    // Only while the tab is open: an idle workbench must not keep pulling the console page.
+    if (!engineFrame.src && enginePanel.dataset.active === 'true') engineFrame.src = engineFrame.dataset.src;
+  }
+
+  var consoleKnown = false;   // once GET / has answered, the probe stops re-fetching the page
+  function checkEngine() {
+    timedFetch(ENGINE + '/status')
       .then(function (r) { return r.json(); })
       .then(function (s) {
-        var running = String(s.status || '').toUpperCase() === 'RUNNING';
+        var state = String(s.status || '').toUpperCase();
+        var running = state === 'RUNNING';
         dot.className = 'dot ' + (running ? 'ok' : 'warn');
-        text.textContent = 'Engine: ' + (running ? 'running' : 'idle') + ' on this Mac';
+        text.textContent = 'Engine: ' + (running ? 'running' : state === 'STOPPING' ? 'stopping' : 'idle') + ' on this Mac';
+        if (consoleKnown || enginePanel.dataset.active !== 'true') { if (consoleKnown) showConsole(); return; }
         // An engine from before the console existed answers /status but not /. Loading it
         // into the frame would show a browser error page with no explanation.
-        return fetch(ENGINE + '/', { mode: 'cors', signal: ctrl && ctrl.signal }).then(function (r) {
-          if (!r.ok) throw new Error('outdated');
-          notice.style.display = 'none';
-          if (engineFrame.style.display === 'none') { engineFrame.style.display = ''; engineFrame.src = engineFrame.dataset.src; }
-        }, function () { showNotice(true); });
+        return timedFetch(ENGINE + '/').then(function (r) {
+          if (!r.ok) { showNotice(true); return; }
+          consoleKnown = true;
+          showConsole();
+        }, function (err) {
+          // A timeout is "slow", not "old": keep the frame as it was and try again next poll.
+          if (err && err.name === 'AbortError') return;
+          showNotice(true);
+        });
       })
       .catch(function () {
         dot.className = 'dot bad';
         text.textContent = 'Engine: not running on this Mac';
+        consoleKnown = false;
         showNotice(false);
-      })
-      .then(function () { if (timer) clearTimeout(timer); });
+      });
   }
 
   var initial = 'task-notif';

@@ -28,9 +28,9 @@ ssh -N -L 4300:127.0.0.1:4300 user@host       # then open http://localhost:4300
 The port is bound to loopback on the VM on purpose. The tools behind it have at most a
 password, so it must not be reachable from the internet.
 
-To run just the workbench container by itself (for example to test an nginx change) use
-`docker compose up` in this folder; it expects containers named `task-notif` and `keep-alive`
-on the same network.
+To test an nginx change without touching the stack's own workbench, run `docker compose up
+--build` in this folder while the stack is up: it joins the stack's network and listens on
+4301 instead of 4300.
 
 ## Files
 
