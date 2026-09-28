@@ -1,0 +1,5 @@
+# The engine imports only Quartz.CoreGraphics; this wheel pulls in pyobjc-core and
+# pyobjc-framework-Cocoa itself. 9.2 is the first release with universal wheels
+# for every Python from 3.9 up, and the cap keeps a future major from breaking
+# the event-tap API underneath us without anyone noticing.
+pyobjc-framework-Quartz>=9.2,<13

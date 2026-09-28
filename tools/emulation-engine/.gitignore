@@ -1,0 +1,5 @@
+# The virtualenv is machine-specific and `make bundle` output is for hand-offs; neither is committed.
+.venv/
+__pycache__/
+*.pyc
+*.zip
