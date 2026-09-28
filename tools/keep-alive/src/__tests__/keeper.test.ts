@@ -6,8 +6,8 @@ import { join } from 'node:path';
 
 // The store resolves its directory once, at import time, so this has to be set first.
 process.env.DATA_DIR = mkdtempSync(join(tmpdir(), 'keeper-'));
-const { getConfig, setConfig } = await import('../config/store.js');
-const { Keeper, parseMaintenance, parseApiBase, probeInstance, slugOf, isKept, touchOrigin } = await import('../keeper/index.js');
+const { getKeepAlive, setKeepAlive } = await import('../store.js');
+const { Keeper, parseMaintenance, parseApiBase, probeInstance, slugOf, isKept, touchOrigin } = await import('../keeper.js');
 
 /**
  * 23 September: dev and QA instances stop after twenty idle minutes, which is shorter
@@ -41,7 +41,7 @@ function world(state: 'running' | 'stopped' | 'starting') {
   return { calls, fetchFn, get state() { return state; }, up() { state = 'running'; } };
 }
 
-const reset = () => setConfig({ keepAlive: { instances: [], pingMinutes: 5, hours: 8, activityPath: '/rest/api/users/isMySessionActive' } });
+const reset = () => setKeepAlive({ instances: [], pingMinutes: 5, hours: 8, activityPath: '/rest/api/users/isMySessionActive' });
 
 test('the maintenance wrapper gives away the app name, and the page its management API', () => {
   assert.deepEqual(parseMaintenance(WRAPPER), {
@@ -144,7 +144,7 @@ test('a kept instance that went down is started again, and not nagged while it s
   assert.equal(v.app, 'QA9C');
   assert.match(v.lastStartResult!, /start requested/);
   assert.equal(w.calls.filter((c) => c.includes('/start?app=QA9C')).length, 1);
-  assert.equal(getConfig().keepAlive.instances[0]!.app, 'QA9C', 'the app name is remembered');
+  assert.equal(getKeepAlive().instances[0]!.app, 'QA9C', 'the app name is remembered');
 
   assert.equal(v.state, 'starting', 'shown as starting the moment Start is pressed, not "stopped"');
   assert.equal(v.nextPingAt, '2026-09-23T10:01:00.000Z', 'looked at again in a minute, not after the full interval');
@@ -198,7 +198,7 @@ test('keeping runs out on its own, so a forgotten Start does not defeat the idle
   k.add(PAGE);
   const t0 = new Date('2026-09-23T10:00:00Z');
   await k.keep('client-9-qa-example-cloud', 1, t0);
-  const inst = getConfig().keepAlive.instances[0]!;
+  const inst = getKeepAlive().instances[0]!;
   assert.equal(isKept(inst, new Date(t0.getTime() + 59 * 60_000)), true);
   assert.equal(isKept(inst, new Date(t0.getTime() + 61 * 60_000)), false);
   const before = w.calls.length;

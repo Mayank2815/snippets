@@ -1,5 +1,5 @@
-import type { KeptInstance } from '../config/schema.js';
-import { getConfig, setConfig } from '../config/store.js';
+import type { KeptInstance } from './schema.js';
+import { getKeepAlive, setKeepAlive } from './store.js';
 
 /**
  * Keeps dev and QA instances awake while someone is working on them.
@@ -59,7 +59,7 @@ const BOOT_WINDOW_MS = 15 * 60_000;
 const FETCH_TIMEOUT_MS = 20_000;
 
 /** Traffic from here should be recognisable in a log, not mistaken for a browser. */
-const USER_AGENT = 'task-notif keep-alive';
+const USER_AGENT = 'keep-alive (dev/QA instance keeper)';
 
 /**
  * CloudFront serves this wrapper in place of a stopped instance: a page embedding the
@@ -187,7 +187,7 @@ export class Keeper {
 
   /** Pings every kept instance whose interval has elapsed. */
   async tick(now: Date = new Date()): Promise<void> {
-    const { instances, pingMinutes } = getConfig().keepAlive;
+    const { instances, pingMinutes } = getKeepAlive();
     for (const inst of instances) {
       if (!isKept(inst, now)) continue;
       const rt = this.runtime.get(inst.id);
@@ -199,11 +199,11 @@ export class Keeper {
 
   /** One ping: probe, remember what was seen, and press Start if it is down and allowed. */
   async ping(id: string, now: Date = new Date()): Promise<InstanceView | null> {
-    const inst = getConfig().keepAlive.instances.find((i) => i.id === id);
+    const inst = getKeepAlive().instances.find((i) => i.id === id);
     if (!inst || this.inFlight.has(id)) return inst ? this.view(inst, now) : null;
     this.inFlight.add(id);
     try {
-      const probe = await probeInstance(inst.url, this.fetchFn, getConfig().keepAlive.activityPath);
+      const probe = await probeInstance(inst.url, this.fetchFn, getKeepAlive().activityPath);
       const prev = this.runtime.get(id);
       const rt: Runtime = {
         lastPingAt: now.toISOString(),
@@ -241,7 +241,7 @@ export class Keeper {
   add(url: string, label = ''): InstanceView[] {
     const clean = new URL(url).toString();
     const id = slugOf(clean);
-    const { instances } = getConfig().keepAlive;
+    const { instances } = getKeepAlive();
     if (!instances.some((i) => i.id === id)) {
       this.save([...instances, { id, url: clean, label, keepUntil: null, app: null, autoStart: true }]);
     }
@@ -249,13 +249,13 @@ export class Keeper {
   }
 
   remove(id: string): InstanceView[] {
-    this.save(getConfig().keepAlive.instances.filter((i) => i.id !== id));
+    this.save(getKeepAlive().instances.filter((i) => i.id !== id));
     this.runtime.delete(id);
     return this.views();
   }
 
   /** Start keeping it awake for the configured hours, and look at it straight away. */
-  async keep(id: string, hours = getConfig().keepAlive.hours, now: Date = new Date()): Promise<InstanceView | null> {
+  async keep(id: string, hours = getKeepAlive().hours, now: Date = new Date()): Promise<InstanceView | null> {
     if (!this.patchInstance(id, { keepUntil: new Date(now.getTime() + hours * 3_600_000).toISOString() })) return null;
     this.runtime.delete(id); // a fresh press means "check now", whatever the last ping said
     return this.ping(id, now);
@@ -263,18 +263,18 @@ export class Keeper {
 
   release(id: string): InstanceView | null {
     if (!this.patchInstance(id, { keepUntil: null })) return null;
-    const inst = getConfig().keepAlive.instances.find((i) => i.id === id)!;
+    const inst = getKeepAlive().instances.find((i) => i.id === id)!;
     return this.view(inst);
   }
 
   views(now: Date = new Date()): InstanceView[] {
-    return getConfig().keepAlive.instances.map((i) => this.view(i, now));
+    return getKeepAlive().instances.map((i) => this.view(i, now));
   }
 
   private view(inst: KeptInstance, now: Date = new Date()): InstanceView {
     const rt = this.runtime.get(inst.id) ?? { lastPingAt: null, state: null, detail: '', lastStartAt: null, lastStartResult: null, apiBase: null };
     const keeping = isKept(inst, now);
-    const interval = this.booting(rt, now) ? BOOT_POLL_MS : getConfig().keepAlive.pingMinutes * 60_000;
+    const interval = this.booting(rt, now) ? BOOT_POLL_MS : getKeepAlive().pingMinutes * 60_000;
     const nextPingAt = keeping && rt.lastPingAt
       ? new Date(new Date(rt.lastPingAt).getTime() + interval).toISOString()
       : keeping ? now.toISOString() : null;
@@ -288,14 +288,14 @@ export class Keeper {
   }
 
   private patchInstance(id: string, patch: Partial<KeptInstance>): boolean {
-    const { instances } = getConfig().keepAlive;
+    const { instances } = getKeepAlive();
     if (!instances.some((i) => i.id === id)) return false;
     this.save(instances.map((i) => (i.id === id ? { ...i, ...patch } : i)));
     return true;
   }
 
   private save(instances: KeptInstance[]): void {
-    setConfig({ keepAlive: { ...getConfig().keepAlive, instances } });
+    setKeepAlive({ instances });
   }
 }
 
