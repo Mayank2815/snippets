@@ -8,6 +8,14 @@ const DAYS = [
 
 const TIMEZONES = ['Asia/Kolkata', 'UTC', 'America/New_York', 'America/Los_Angeles', 'Europe/London', 'Australia/Sydney'];
 
+/** "3h", "1h 18m", "36m" — the same way the Slack messages say it. */
+function duration(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = Math.round(minutes % 60);
+  if (h === 0) return `${m}m`;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, {
     ...init,
@@ -546,7 +554,8 @@ export default function App() {
                 <strong>{p.label}</strong>{' '}
                 <span className="pill">{p.completed.length} closed</span>{' '}
                 <span className="pill">{p.workedOn.length} tasks touched</span>{' '}
-                <span className="pill">{p.comments} comments</span>
+                <span className="pill">{p.comments} comments</span>{' '}
+                {p.totalMinutes > 0 && <span className="pill">{duration(p.totalMinutes)} logged</span>}
                 {p.completed.length === 0 && p.workedOn.length === 0 && (
                   <p className="muted">Nothing recorded in this range.</p>
                 )}
@@ -567,7 +576,7 @@ export default function App() {
                     {p.workedOn.map((t) => (
                       <div className="item" key={`w${t.taskId}`}>
                         <a href={t.link} target="_blank" rel="noreferrer">{t.taskName}</a>
-                        <div className="meta">{t.project ?? '—'}</div>
+                        <div className="meta">{t.project ?? '—'}{t.minutes > 0 ? ` · ${duration(t.minutes)}` : ''}</div>
                       </div>
                     ))}
                   </div>
