@@ -146,7 +146,7 @@ test('yesterday\'s successful send does not satisfy today', () => {
 // On 2026-09-28 the Mac slept 38 minutes in the evening; the 21:00 digest timer fired at
 // 21:37, after the catch-up poll had sent the digest at 21:06, and everyone got it twice.
 
-import { TIMER_TICK_MS, slotAlreadyDelivered, timerDelayMs } from '../scheduler/index.js';
+import { TIMER_TICK_MS, lateNote, slotAlreadyDelivered, timerDelayMs } from '../scheduler/index.js';
 
 test('a slot already sent by catch-up is not sent again by the late timer', () => {
   const slot = at('2026-09-28T21:00');
@@ -166,4 +166,8 @@ test('the timer re-arms every minute instead of sleeping until the slot', () => 
   // Close to the slot it waits exactly the remaining time, never past it.
   assert.equal(timerDelayMs(slot, at('2026-09-28T20:59:30')), 30_000);
   assert.equal(timerDelayMs(slot, at('2026-09-28T21:05')), 0);
+});
+
+test('both paths word a late message identically, so a wake reads the same as a catch-up', () => {
+  assert.equal(lateNote('09:00'), '⏰ Late — this did not get through at 09:00');
 });
