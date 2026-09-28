@@ -1,28 +1,90 @@
 # Architecture
 
-One process, two threads, one HTML file.
+One process, two threads, one HTML file, one input backend per platform.
 
 ```
- browser (console/index.html, or another page served from this Mac)
-      │  GET /status every 2 s, POST /start, POST /stop
-      │  (CORS: Origin reflected only for http://127.0.0.1 / http://localhost;
-      │   POSTs must carry X-Engine-Control: 1)
-      ▼
- ┌──────────────────────────── mac_engine.py ────────────────────────────┐
- │  main thread: HTTPServer on 127.0.0.1:4320  (EngineBridgeHandler)     │
- │      GET  /          -> reads ../console/index.html, serves it        │
- │      GET  /status    -> {"status": "IDLE" | "RUNNING" | "STOPPING"}   │
- │      POST /start     -> new stop Event + loop_worker thread, or 409   │
- │                         while the previous worker is still alive      │
- │      POST /stop      -> sets the worker's Event; loop exits after     │
- │                         its current step                              │
- │      OPTIONS *       -> 200 + CORS headers (preflight)                │
- │      SIGTERM / Ctrl-C-> stop, join worker 2 s, Command key-up, exit   │
- │                                                                       │
- │  engine thread (daemon): loop_worker(stop) while not stop.is_set()    │
- │      Quartz CGEventPost -> kCGHIDEventTap -> macOS input              │
- └───────────────────────────────────────────────────────────────────────┘
+ browser (console/index.html, or another page served from this computer)
+      |  GET /status every 2 s, POST /start, POST /stop
+      |  (CORS: Origin reflected only for http://127.0.0.1 / http://localhost;
+      |   POSTs must carry X-Engine-Control: 1)
+      v
+ +----------------------------- engine.py ------------------------------+
+ |  main thread: HTTPServer on 127.0.0.1:4320  (EngineBridgeHandler)    |
+ |      GET  /          -> reads ../console/index.html, serves it       |
+ |      GET  /status    -> {"status": IDLE|RUNNING|STOPPING,            |
+ |                          "backend": "quartz", "platform": "darwin"}  |
+ |      POST /start     -> new stop Event + loop_worker thread, or 409  |
+ |                         while the previous worker is still alive     |
+ |      POST /stop      -> sets the worker's Event; loop exits after    |
+ |                         its current step                             |
+ |      OPTIONS *       -> 200 + CORS headers (preflight)               |
+ |      SIGTERM/Ctrl-C  -> stop, join worker 2 s, release modifiers     |
+ |                                                                      |
+ |  engine thread (daemon): loop_worker(stop) while not stop.is_set()   |
+ |      every OS call goes through the backend object ------------+     |
+ +----------------------------------------------------------------|-----+
+                                                                  v
+ +--------------------- engine/backends/ (get_backend()) ---------------+
+ |  base.py    the contract: mouse_position, screen_size, move_mouse,   |
+ |             click, scroll, tap_key, app_switch, browser_tab_next,    |
+ |             visible_app_count, release_modifiers, name, platform_note|
+ |  quartz.py  darwin -> CGEventPost -> kCGHIDEventTap -> macOS input   |
+ |  pynput_backend.py  win32 -> SendInput | linux -> X11/XTest          |
+ |  fake.py    records every call, generates nothing (tests, CI)        |
+ +----------------------------------------------------------------------+
 ```
+
+## The backend layer
+
+`engine.py` holds the loop — the cadence, the probabilities, the target
+rectangle, every timing constant — and never talks to the operating system
+directly. Everything platform-specific sits behind one object obtained once at
+import time:
+
+```python
+from backends import get_backend
+backend = get_backend()
+```
+
+`backends/__init__.py` picks by `sys.platform`: `darwin` -> `quartz`, `win32`
+and `linux` -> `pynput`. The environment variable
+`ENGINE_BACKEND=fake|quartz|pynput` overrides that, which is how the tests run
+the whole engine on a developer's Mac without moving the real pointer. An
+unknown override or an unsupported platform raises `ValueError`, and a missing
+platform library raises `ImportError`; `engine.py` catches both and exits with
+one clear line rather than a traceback from deep inside an import.
+
+### What differs per platform, and what does not
+
+The loop calls the same ten methods everywhere. Only these differ:
+
+| Concept              | macOS (`quartz`)                    | Windows / Linux (`pynput`)     |
+|----------------------|-------------------------------------|--------------------------------|
+| app switcher         | Command held + Tab x n              | Alt held + Tab x n             |
+| next browser tab     | Cmd+Option+Right (flags `0x180000`) | Ctrl+Tab                       |
+| key identity         | virtual key codes 123–126, 56, 48   | `pynput.keyboard.Key` members  |
+| window count         | `osascript` System Events, timeout 5 s | Windows: `EnumWindows` via ctypes; Linux: `wmctrl -l` lines |
+| modifiers released on shutdown | Command                   | Alt and Ctrl                   |
+
+Everything else is shared: the hold times (12–25 ms per key, 80/50/180/300 ms
+through an app switch, 50–100 ms for a chord, 20 ms for a click), the fallback
+of **5** when the window count cannot be determined, and the requirement that a
+backend call never blocks for long — the loop only checks its stop Event
+between calls, so a hanging backend call makes `/stop` hang too.
+
+The loop refers to keys by **name** (`'left'`, `'right'`, `'up'`, `'down'`,
+`'tab'`, `'shift'`) and each backend maps those to its own codes. That is what
+let the macOS key-code table move out of the loop without changing behaviour.
+
+### The sleep scale
+
+`backends/base.py` exports `pause()` and `SLEEP_SCALE`. Every hold and gap in
+the loop and in the backends goes through `pause()`, which multiplies by
+`SLEEP_SCALE` — `1.0` normally, `0.01` when `ENGINE_FAST=1`. The end-of-cycle
+`stop.wait()` applies the same factor. That is purely a test lever: it lets
+`engine/tests/test_engine.py` exercise a real cycle in milliseconds instead of
+the real 13–17 seconds, on exactly the same code path. It is never set in
+normal use.
 
 ## The HTTP server
 
@@ -82,7 +144,10 @@ walk deeper into the app list instead of bouncing between the same two apps.
 
 The state reported by `/status` is derived, not stored — `engine_state()`:
 no thread or a dead thread is **IDLE**; a live thread whose Event is clear is
-**RUNNING**; a live thread whose Event is set is **STOPPING**.
+**RUNNING**; a live thread whose Event is set is **STOPPING**. `/status` also
+returns `backend` (`quartz`, `pynput` or `fake`) and `platform`
+(`sys.platform`), which the console shows in its header so you can tell at a
+glance which input path is live.
 
 Stop is cooperative: `/stop` sets the worker's Event. Every loop and inner
 loop checks `stop.is_set()`, and the end-of-cycle pause is `stop.wait(...)`
@@ -103,10 +168,12 @@ console renders as "Stopping…" with both buttons disabled.
 
 **Shutdown.** Ctrl-C and SIGTERM (what `run.sh`'s trap sends) take the same
 path: close the socket, set the Event, join the worker for up to 2 s, then
-post a Command key-up regardless — if the worker was killed in the middle of
-a Cmd+Tab, the synthetic Command modifier would otherwise stay held for the
-rest of the login session. The thread is a daemon, so a worker that has not
-finished in 2 s never blocks the exit.
+call `backend.release_modifiers()` regardless — if the worker was killed in
+the middle of an app switch, the synthetic modifier (Command on macOS,
+Alt/Ctrl elsewhere) would otherwise stay held for the rest of the login
+session. The thread is a daemon, so a worker that has not finished in 2 s never
+blocks the exit. `shutdown_engine()` is a named function precisely so the tests
+can call the same path the signal handler does.
 
 ## The loop (`loop_worker`)
 
@@ -128,25 +195,27 @@ Each cycle:
   whose two inner control points sit at 25 % and 75 % of the path and are
   nudged by ±8–15 % of the distance. It is sampled 18–40 times (about one
   sample per 16 px) with a quintic smoothstep easing so the pointer starts and
-  stops gently, posting `kCGEventMouseMoved` 5–10 ms apart.
-- **`post_dense_keystroke(code)`** — key down, hold 12–25 ms, key up, through
-  `CGEventCreateKeyboardEvent`. Only virtual key codes 123–126 (arrows) and 56
-  (Shift) are ever used here.
-- **`simulate_real_app_switch()`** — asks System Events (via `osascript`) how
-  many non-background apps are open, holds Command (key 55), presses Tab (48)
-  `app_cycle_index` times with the Command flag (`0x100000`) on each event,
-  waits 300 ms and releases Command. The index then advances, wrapping when it
-  reaches the app count.
-- **`hardware_browser_tab_switch()`** — one Right-arrow press carrying the
-  Command|Option flags (`0x180000`), which Safari and Chrome bind to "next tab".
-- **`simulate_vertical_scrolling()`** — 4–8 `CGEventCreateScrollWheelEvent`
-  line-unit events in a random direction, 150–300 ms apart.
-- **`get_total_visible_apps_count()`** — the AppleScript query above, with a
-  5 s timeout so the Automation permission dialog cannot hang the worker;
-  falls back to 5 when the query fails (no permission, timeout, odd output).
+  stops gently, calling `backend.move_mouse()` 5–10 ms apart.
+- **`backend.tap_key(name)`** — key down, hold 12–25 ms, key up. Only the
+  arrows and Shift are ever used here (virtual key codes 123–126 and 56 on
+  macOS; `Key.left` … `Key.shift` under pynput).
+- **`simulate_real_app_switch()`** — asks `backend.visible_app_count()` how
+  many windows/apps are open, then `backend.app_switch(app_cycle_index)`, which
+  holds the switcher modifier, presses Tab that many times and releases. The
+  index then advances, wrapping when it reaches the app count.
+- **`hardware_browser_tab_switch()`** — `backend.browser_tab_next()`:
+  Cmd+Option+Right on macOS (which Safari and Chrome bind to "next tab"),
+  Ctrl+Tab on Windows and Linux.
+- **`simulate_vertical_scrolling()`** — 4–8 single-notch `backend.scroll()`
+  calls in a random direction, 150–300 ms apart.
+- **`backend.visible_app_count()`** — the AppleScript query on macOS with a 5 s
+  timeout so the Automation permission dialog cannot hang the worker;
+  `EnumWindows` + `IsWindowVisible` + `GetWindowTextLength` via ctypes on
+  Windows (no extra dependency); `wmctrl -l` line count on Linux when wmctrl is
+  installed. All three fall back to 5 on any failure.
 
-None of the emulation numbers changed during the extraction; each one now has
-a `WHY` comment next to it in the source.
+None of the emulation numbers changed during the extraction or the
+cross-platform work; each one has a `WHY` comment next to it in the source.
 
 ## The console page
 
@@ -163,21 +232,48 @@ task-notif dashboard so the tools look related.
 
 ## The scripts
 
-`install.sh` refuses on anything but Darwin, checks that the Command Line
-Tools are present when `python3` is only Apple's stub (and says to run
-`xcode-select --install`), checks `python3 >= 3.9`, creates `.venv`, installs
-`requirements.txt`, proves `import Quartz.CoreGraphics` works from the venv,
-and prints the Accessibility steps. `run.sh` refuses without `.venv`, refuses
-if the port is already bound (with the `lsof` line to find the culprit),
-starts the engine in the background, polls `/status` for up to 10 s, `open`s
-the console unless `--no-open`, and `wait`s on the engine so Ctrl-C reaches
-both. A trap sends the engine SIGTERM on any exit, which the engine handles
-exactly like Ctrl-C (see Shutdown above).
+`install.sh` serves **macOS and Linux** and refuses anything else (pointing at
+`install.ps1`). On macOS it checks that the Command Line Tools are present when
+`python3` is only Apple's stub (and says to run `xcode-select --install`),
+proves `import Quartz.CoreGraphics` works from the venv, and prints the
+Accessibility steps. On Linux it prints `sudo apt install python3-venv` when
+`python3 -m venv` fails, `sudo apt install build-essential python3-dev` when
+pip cannot build pynput's `evdev` dependency, warns when `wmctrl` is missing
+(optional) and when `XDG_SESSION_TYPE` is `wayland`, and checks pynput with
+`importlib.util.find_spec` rather than importing it — importing pynput on Linux
+connects to the X server at once and fails without `DISPLAY`, which says
+nothing about whether the install worked. Both paths check `python3 >= 3.9` and
+reuse an existing `.venv`.
+
+`run.sh` refuses without `.venv`, refuses if the port is already bound (with
+the `lsof` line to find the culprit), starts the engine in the background,
+polls `/status` for up to 10 s, opens the console unless `--no-open` (`open` on
+macOS, `xdg-open` on Linux, silently skipped when neither exists — a headless
+box has neither), and `wait`s on the engine so Ctrl-C reaches both. A trap
+sends the engine SIGTERM on any exit, which the engine handles exactly like
+Ctrl-C (see Shutdown above).
+
+`install.ps1` and `run.ps1` are the Windows equivalents, written for Windows
+PowerShell 5.1 with no external modules. `install.ps1` finds Python through
+`py -3` first (the launcher is immune to the Microsoft Store's `python` alias,
+which only opens the Store) then plain `python`, requires 3.9+, creates `.venv`
+and pip-installs into it. `run.ps1` refuses without `.venv`, refuses a bound
+port using `netstat -ano` (printing the `netstat -ano | findstr :4320` hint),
+activates the venv, starts `engine\engine.py`, polls `/status` with a 1 s
+timeout up to 10 times, opens the browser with `Start-Process` unless
+`-NoOpen`, and keeps the engine in the foreground so Ctrl-C stops it. Windows
+may need `Set-ExecutionPolicy -Scope Process Bypass` once per window before an
+unsigned `.ps1` will run.
+
+`requirements.txt` carries both libraries behind pip environment markers
+(`pyobjc-framework-Quartz ... ; sys_platform == "darwin"` and
+`pynput ... ; sys_platform != "darwin"`), so one file serves every platform and
+pip installs exactly one of them.
 
 ## Why the old Express bridge is gone
 
 `tools/task-notif/src/server/bridge-controller.ts` spawned `python3
-engine/mac_engine.py` and proxied three routes. That only ever worked when the
+engine/mac_engine.py` (now `engine/engine.py`) and proxied three routes. That only ever worked when the
 Node server itself ran on a Mac; on the Linux host task-notif deploys to it
 could do nothing. Serving the console from the engine removes the proxy, the
 `axios` dependency and the Vite `/automation` proxy entry in one go, and the

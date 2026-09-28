@@ -1,5 +1,13 @@
-# The engine imports only Quartz.CoreGraphics; this wheel pulls in pyobjc-core and
-# pyobjc-framework-Cocoa itself. 9.2 is the first release with universal wheels
-# for every Python from 3.9 up, and the cap keeps a future major from breaking
-# the event-tap API underneath us without anyone noticing.
-pyobjc-framework-Quartz>=9.2,<13
+# One input library per platform; pip's environment markers pick the right one,
+# so the same file works for install.sh (macOS, Linux) and install.ps1 (Windows).
+#
+# macOS: the engine imports only Quartz.CoreGraphics; this wheel pulls in
+# pyobjc-core and pyobjc-framework-Cocoa itself. 9.2 is the first release with
+# universal wheels for every Python from 3.9 up, and the cap keeps a future major
+# from breaking the event-tap API underneath us without anyone noticing.
+pyobjc-framework-Quartz>=9.2,<13; sys_platform == "darwin"
+# Windows and Linux: pynput wraps SendInput / XTest. 1.7 is the first release
+# whose Linux backend selection (xorg vs uinput) is stable; the cap keeps a
+# future major from changing the Controller API. On Linux it pulls in
+# python-xlib and evdev (evdev compiles, so gcc and headers must be present).
+pynput>=1.7,<2; sys_platform != "darwin"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Starts the Core Emulation Engine from .venv, waits until it answers, opens the
 # console in the default browser and keeps the engine in the foreground so
-# Ctrl-C stops it.
+# Ctrl-C stops it. macOS and Linux; Windows uses run.ps1.
 #
 #   ./run.sh              start and open http://127.0.0.1:4320/
 #   ./run.sh --no-open    start without opening a browser
@@ -25,7 +25,7 @@ if [[ ! -x .venv/bin/python ]]; then
   exit 1
 fi
 
-# WHY 4320: must match DEFAULT_PORT in engine/mac_engine.py (one above task-notif's 4310).
+# WHY 4320: must match DEFAULT_PORT in engine/engine.py (one above task-notif's 4310).
 PORT="${PORT:-4320}"
 URL="http://127.0.0.1:${PORT}"
 # WHY -m 1 on every curl: the engine is on loopback and answers in microseconds, so
@@ -44,11 +44,11 @@ set +u
 source .venv/bin/activate
 set -u
 
-PORT="$PORT" python engine/mac_engine.py &
+PORT="$PORT" python engine/engine.py &
 ENGINE_PID=$!
 
 # Sends SIGTERM; the engine handles it like Ctrl-C (stops the loop, releases the
-# Command key, prints "Shutdown complete.") and `wait` lets that finish.
+# switcher modifier, prints "Shutdown complete.") and `wait` lets that finish.
 stop_engine() {
   if kill -0 "$ENGINE_PID" 2>/dev/null; then
     kill "$ENGINE_PID" 2>/dev/null || true
@@ -77,7 +77,13 @@ fi
 
 echo "Engine is up: $URL/   (Ctrl-C stops it)"
 if [[ "$OPEN_BROWSER" == "1" ]]; then
-  open "$URL/" || echo "run.sh: could not open a browser — open $URL/ yourself."
+  # `open` is macOS, `xdg-open` is Linux desktops; a headless Linux box has
+  # neither, and then the URL printed above is all the user needs.
+  if command -v open >/dev/null 2>&1 && [[ "$(uname -s)" == "Darwin" ]]; then
+    open "$URL/" || echo "run.sh: could not open a browser — open $URL/ yourself."
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$URL/" >/dev/null 2>&1 || echo "run.sh: could not open a browser — open $URL/ yourself."
+  fi
 fi
 
 wait "$ENGINE_PID" || true
