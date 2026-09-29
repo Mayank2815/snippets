@@ -2,6 +2,209 @@
 
 Dated, newest first. Add to this file whenever the engine bites you.
 
+## 2026-09-29 — the activity governor: what the calibration actually showed
+
+The engine was asked to hold a specific number: every 10-minute window random,
+**never above 65 %**, and a **3-hour average between 38 % and 47 %**, where a
+window is 60 blocks of 10 seconds and a block counts if any input landed in it.
+It had no idea what its own rate was. Six things came out of building that, and
+four of them were surprises.
+
+### The loop had to be made BUSIER, not quieter
+
+The obvious move is to add quiet. It is the wrong one. If the loop's own
+unconstrained rate sits anywhere near the target, the governor barely binds and
+the activity rate goes back to being an accident of the profile mix — which is
+exactly the thing being replaced.
+
+Measured, with the shipped profiles of that morning (BURST 6-9 s, STANDARD
+11.5-15.5 s, READING 16-24 s of end-of-cycle quiet, THINKING one draw in six):
+
+| | natural rate | 3-hour average | worst run | runs outside the band |
+|---|---|---|---|---|
+| old profiles | **51.1 %** | 40.2 % | 35.1 % | 16 of 120 |
+| shorter quiet, THINKING 1 in 10 | **66.7 %** | 43.5 % | 38.2 % | 3 of 120 |
+| + the final target bag | **70.0 %** | **43.1 %** | 39.8 % | **0 of 2000** |
+
+"Natural rate" is the loop with the governor removed entirely. It has to sit
+well *above* the target for the governor to be the thing in control.
+
+So the profile quiet ranges came down (3-6 / 5-9 / 8-14 s) and THINKING went
+from one draw in six to one in ten. THINKING was not deleted: the governor's own
+quiet is an even trickle — that is precisely what pacing produces — and THINKING
+is the only thing that makes one *long* unmistakably human gap. But at one in
+six it cost about two and a half points of the three-hour average for nothing,
+by throwing away pro-rata opportunity the governor had already granted.
+
+### Pacing stops front-loading. It does not stop catch-up, and that is the leak
+
+Pro-rata pacing ("by block *e* of 60 you may have spent at most *e*/60 of the
+budget") limits running **ahead**. It says nothing about running **behind** and
+then catching up — and a window whose first half was a long quiet pause is
+entitled to spend its whole budget in the second half.
+
+Put two of those side by side and the ten minutes spanning the boundary holds
+45 ticked blocks — **75 %** — while both fixed windows read comfortably under
+the ceiling. Measured at exactly 75.0 % in a whole simulated run before the fix,
+and 78.3 % under a deliberately adversarial pattern.
+
+A tracker does not have to line its windows up with ours. So the ceiling is
+enforced over a **rolling** 60 blocks (`_rolling_used()`), not over the windows
+the engine happens to anchor. That single check is the difference between the
+promise being true and being true-only-if-you-measure-it-our-way. Both forms are
+now asserted, and the calibration run reports both.
+
+### Independent random draws could not hit the band; a shuffled bag could
+
+Wanting two things at once — consecutive windows that visibly differ, AND a
+3-hour average reliably inside a 9-point band — is a variance problem. With an
+independent uniform draw per window, 18 windows give a run-average standard
+deviation of about 1.5 points, so runs outside the band were a matter of time;
+the only fix was to narrow the draw until every window looked the same:
+
+| draw | mean | spread over 600 runs | outside the band |
+|---|---|---|---|
+| uniform 19-38 blocks | 43.5 % | 38.2-47.4 % | 3 |
+| uniform 22-33 | 43.5 % | 38.2-48.5 % | 3 |
+| uniform 25-30 (narrow) | 43.0 % | 39.4-45.7 % | 0 |
+| **bag of 6, jittered ±1** | **43.1 %** | **39.8-45.5 %** | **0 of 2,000** |
+
+A **shuffle bag** gets both. Six budgets (22, 25, 27, 28, 30, 33 blocks) are
+dealt in random order, refilled and reshuffled when empty, each nudged by ±1.
+The next window is still a surprise; any six consecutive windows average the
+bag's mean exactly. Three hours is eighteen windows — three whole bags — so the
+run average varies only by what the loop itself loses. Over 2,000 simulated
+runs: **43.11 %**, spread 39.81-45.46 %, sd 0.83, none outside the band.
+
+(The sweep rows above are 600 runs each, which is what they were compared at;
+the shipped setting was then re-measured over 2,000.)
+
+One more thing the simulator had to be told: a three-hour run is **eighteen**
+windows. The loop stops at the first check after the three hours are up, so a
+cycle straddling the end opened a nineteenth window holding a few seconds and a
+block or two — which dragged the reported average down by about a point and
+tripled the apparent variance (sd 1.15 against the true 0.83). It is an
+artefact of where the simulation stops, not something a tracker would ever
+score, and counting it was quietly making the calibration look worse than it
+is.
+
+**The bag's mean is deliberately ~3 points above the target average.** The loop
+never spends its whole budget — a THINKING pause, a cycle ending near a window
+boundary — and three points is what that costs, measured rather than assumed.
+
+### Separating the person's input from the engine's own: two ways to get it fatally wrong
+
+No platform offers "when did the *user* last do something". Each offers one
+number — seconds since the last input of any kind — and the engine's own
+synthetic events reset it exactly as real ones do. The separation is by
+timestamp: input counts as the person's when it is later than the moment the
+engine itself last acted, by a margin. Both failure modes are total:
+
+- **Stamping "the engine acted" BEFORE the backend call.** An app switch holds a
+  modifier for up to two seconds and the OS stamps its idle timer at the end.
+  With the stamp taken first, the engine reads its own switch as somebody
+  sitting down and pauses. Then it pauses again. Forever. `note_engine_input()`
+  is therefore called *after* every call returns.
+- **Starting with the stamp at "never".** Pressing Start in the console is user
+  input, and so is the keystroke that launched `run.sh`. Without stamping the
+  moment of start, the engine pauses the instant it starts — which looks
+  precisely like a broken Start button.
+
+What this approach genuinely cannot do is notice the person **while the engine
+is mid-burst**; its own events mask theirs. Measured in simulation, about one
+human block in ten is missed that way. It is not worth closing: the loop is
+quiet for most of every cycle, and a masked keystroke lands in a block the
+engine is ticking anyway. The honest consequence, also measured: with a person
+active in 20 % of blocks, the engine stands down for ~40 % of the run and its
+own accounting stays under the ceiling, but the *combined* rolling figure can
+reach ~68 % — the engine cannot count what it cannot see, and it cannot make
+somebody else type less. `test_metrics.py --human` prints that, with the caveat
+spelled out, rather than quietly reporting the number it can control.
+
+### The target rectangle had been wrong on every machine but one
+
+`loop_worker` clamped the pointer to `x 200-1100, y 200-650` — written for a 13"
+1280x800 display. On the 1470x956 Mac this was developed on that is **29 % of
+the screen, all of it top-left**; the pointer never once visited the right-hand
+third or the bottom quarter. On a 4K display it is 9 %. A pointer that only ever
+lives in one corner is its own tell, and `backend.screen_size()` had existed and
+been called at startup the whole time.
+
+It is now 10 % in from each edge with a 60 px floor (64 % of the screen
+reachable, clearing menu bars, docks, taskbars and hot corners at any size), and
+the hop between targets is 35 % of the rectangle rather than a fixed ±300 px —
+otherwise the pointer crawls on a large display. Verified on this Mac
+(1470x956 → x 147-1323, y 95-861) and in a container on a 2560x1440 Xvfb
+(→ x 256-2304, y 144-1296, 64.0 %, all nine regions of a 3x3 grid visited).
+
+### The old test_metrics.py was worse than nothing
+
+It modelled "2-2.5 s of action then 14-24 s of sleep", which matched no cadence
+the engine ever had — the 2026-09-28 entry below already flagged it as
+describing a "V7" — and then printed
+`✅ PERFECTLY OPTIMIZED. SAFE FOR PRODUCTION WORK.` A confident tick about a
+model of nothing is worse than silence, because it stops anybody looking.
+
+The replacement imports every number it uses from `engine.py` and
+`governor.py` and declares none of its own; steps a virtual clock through three
+simulated hours of the real loop driving the real governor; runs 200+
+independent trials; reports per-window percentages, the worst fixed window, the
+worst *rolling* window, the distribution of the run average, and a pass/fail;
+and **exits non-zero**, so `make test` goes red on a miscalibration. It does
+about 600 simulated hours in a second.
+
+The one residual coupling worth knowing: `engine.cycle_seconds()` is a *model*
+of how long a cycle takes, composed from the loop's own constants but not run by
+the loop itself. Change the order or contents of a cycle in `loop_worker` and
+that function has to move with it. It assumes no claim is refused mid-cycle,
+which makes a simulated cycle slightly longer than a truncated real one — the
+conservative direction, since a longer cycle touches more blocks.
+
+### Smaller things
+
+- **`ENGINE_FAST` has to scale the governor's clock too.** The governor measures
+  ten-second blocks of wall time; with sleeps shrunk by 100 and the clock left
+  alone, a whole fast-mode test run sits inside one block and the governor
+  behaves nothing like it does in production. `engine_time()` is
+  `time.monotonic() / SLEEP_SCALE`, which keeps the proportions identical at
+  either speed — and is what lets the auto-stop and the pause behaviour be
+  tested in milliseconds on the real code path.
+- **The idle poll must not be recorded by the fake backend.** It fires about
+  once a second, including all the way through a THINKING pause and while
+  paused; recording it in `calls` would bury the input calls every test asserts
+  on and make "THINKING generates nothing" impossible to state. It has its own
+  counter instead.
+- **The hold times moved to `backends/base.py`.** Both backends carried their
+  own copy of the same seven numbers with the same WHY comments — two places to
+  change, one to forget — and the cycle-duration model needs an honest source
+  for them rather than a third copy.
+- **Clicking is off by default now.** One cycle in five clicked wherever the
+  pointer was, in whatever window was in front: a link, a Send button, a tab's
+  close box, a Delete in a dialog. Everything else the loop does is reversible.
+  `ENGINE_ALLOW_CLICK=1` brings it back, and the code and its tests stay.
+- **A run stops itself after three hours** (`ENGINE_MAX_HOURS`). Same reasoning
+  as `tools/keep-alive`'s fixed keep-until window, and three hours is the span
+  the activity band is actually measured over.
+- **Linux idle time works through `ctypes` and needs no new dependency.**
+  `libXss`'s `XScreenSaverQueryInfo` answers on any normal X session (measured
+  in a container: 58.8 s, then 60.8 s two seconds later), with `xprintidle` as a
+  fallback. With **neither**, it must return `None` — a guess there would make
+  the engine pause at random — and `/status` carries `userInputVisible: false`
+  so the console can say the feature is inert rather than implying it works.
+
+### Still unproven
+
+The **Windows** idle path (`GetLastInputInfo`) is unverified on real hardware,
+like the rest of this file's Windows code. In particular, whether input posted
+through `SendInput` resets it exactly as hardware input does is assumed from
+documentation, not measured — and if it does not, the engine would read its own
+keystrokes as the user's and pause forever on Windows. That is the first thing
+to check on a real Windows box. The **macOS input path** is still
+unchanged-by-inspection: `/start` was never sent to a Quartz engine here, though
+`CGEventSourceSecondsSinceLastEventType` itself was called directly and answered
+(415.4 s idle on an idle Mac). A **real GNOME or KDE desktop session** remains
+untested, unchanged from the entry below.
+
 ## 2026-09-29 — one apt line for every distribution, and x86_64 at last
 
 Everything below this entry was proven on **aarch64 only** (Colima on Apple
@@ -426,6 +629,9 @@ own keymap.
   3–5 s of keystrokes plus a switch/scroll, then sleeps 9.5–12.5 s. The
   simulator logic was left untouched on purpose (it is a historical
   calibration tool); update both if you retune the engine.
+  **Superseded on 2026-09-29** — leaving it stale was the wrong call and it
+  went on to print a tick about a model of nothing. It is now a real simulator
+  that imports every number from the engine. See the top entry.
 
 - **A stale engine can sit on port 4320 for days.** The old bridge spawned the
   engine `detached` with `unref()`, so it outlived the Node server that
@@ -470,6 +676,9 @@ own keymap.
 - **The target rectangle assumes a 1280×800-point display.** The pointer is
   clamped to x 200–1100, y 200–650, which on a larger external display keeps
   it in the top-left region. Widen the clamp if that matters.
+  **Fixed on 2026-09-29** — it is now derived from `backend.screen_size()`.
+  "If that matters" was underselling it: it mattered on every display anyone
+  here actually uses. See the top entry.
 
 - **Stop is not instant, but it is quick.** `/stop` sets the worker's Event;
   the worker checks it between events and the end-of-cycle pause waits on it,

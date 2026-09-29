@@ -2,8 +2,14 @@
 
 The Core Emulation Engine is a Python script (`engine/engine.py`) that posts
 synthetic input on the computer it runs on: curved mouse moves, bursts of
-arrow-key and Shift presses, app switches, browser-tab switches, wheel
-scrolling and the occasional click, on a roughly 13–17 second cycle. A tiny
+arrow-key and Shift presses, app switches, browser-tab switches and wheel
+scrolling, on a cycle of a few seconds to half a minute. How much of that
+happens is not left to chance: an **activity governor** (`engine/governor.py`)
+holds the engine to a measured band — a tracker scores ten minutes as 60 blocks
+of ten seconds, and the engine gives each window a random share of them, never
+crosses 65 %, spreads the share across the window, counts the person's own
+typing against it, stands down entirely while somebody is using the machine,
+and stops the run after three hours. A tiny
 built-in HTTP server on `127.0.0.1:4320` lets a web page start and stop it and
 read its state, and the same server hands out that web page
 (`console/index.html`) at `/`.
@@ -34,6 +40,7 @@ Where things are:
 | Path                             | Role                                                     |
 |----------------------------------|----------------------------------------------------------|
 | `engine/engine.py`               | engine loop + HTTP server + console file serving         |
+| `engine/governor.py`             | the activity governor: budget, ceiling, pacing, pausing  |
 | `engine/backends/base.py`        | the contract every input backend implements              |
 | `engine/backends/quartz.py`      | macOS input (pyobjc Quartz event taps)                   |
 | `engine/backends/pynput_backend.py` | Windows and Linux input (pynput)                      |
@@ -41,8 +48,9 @@ Where things are:
 | `engine/backends/unavailable.py` | stand-in when it cannot, so the console can explain      |
 | `engine/backends/fake.py`        | records calls, generates nothing (tests, CI)             |
 | `engine/tests/test_engine.py`    | engine tests against the fake backend                    |
+| `engine/tests/test_governor.py`  | the governor, and the calibration it promises            |
 | `engine/tests/test_linux_session.py` | the session check and the unavailable backend        |
-| `engine/test_metrics.py`         | offline simulator of the action cadence (no input)       |
+| `engine/test_metrics.py`         | 3-hour activity simulator on a virtual clock (no input)  |
 | `console/index.html`             | single-file control page, inline CSS/JS                  |
 | `install.sh` / `run.sh`          | venv setup and start/open/stop — macOS and Linux         |
 | `install.ps1` / `run.ps1`        | the same for Windows (PowerShell 5.1 compatible)         |

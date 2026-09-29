@@ -15,7 +15,10 @@ make install | run | test    # same as the scripts; test runs the engine tests +
 make bundle                  # emulation-engine-<YYYYMMDD>.zip of this folder minus .venv
 
 .venv/bin/python engine/engine.py         # start the server by hand (foreground)
-python3 engine/test_metrics.py            # offline cadence simulator, needs no input library
+python3 engine/test_metrics.py            # 3-hour activity simulator (virtual clock, no input library)
+python3 engine/test_metrics.py --trials 500 --quiet    # a wider sweep, no per-window listing
+python3 engine/test_metrics.py --human    # and with a person working alongside the engine
+python3 engine/test_metrics.py --seed 7   # a different (still fixed) seed
 python3 -m unittest discover -s engine/tests -v   # engine tests (fake backend, no input)
 ENGINE_BACKEND=fake .venv/bin/python engine/engine.py   # real server, no input generated
 ```
@@ -47,9 +50,33 @@ There is no `make` on Windows — use the two `.ps1` scripts directly.
 
 ```bash
 ENGINE_BACKEND=fake|quartz|pynput   # override the automatic choice
-ENGINE_FAST=1                       # scale every sleep by 0.01 (tests only)
+ENGINE_FAST=1                       # scale every sleep — AND the governor's clock — by 0.01 (tests only)
 ENGINE_ALLOW_WAYLAND=1              # Linux: run on Wayland anyway (XWayland windows only);
                                     # the warning still shows in /status and the console
+ENGINE_ALLOW_CLICK=1                # allow the occasional left click. OFF by default: a click
+                                    # lands on whatever is in front and cannot be undone
+ENGINE_MAX_HOURS=8                  # how long a run lasts before it stops itself (default 3;
+                                    # 0 means no limit)
+PORT=4321                           # move the server off 4320
+```
+
+## Activity (the governor)
+
+The numbers the engine holds itself to, all in a tracker's own units — 60
+blocks of 10 seconds per 10-minute window, a block ticked by any input at all:
+
+| | |
+|---|---|
+| hard ceiling | **39 of 60 blocks (65 %)**, never crossed, checked over any rolling 10 minutes |
+| per-window budget | **21-34 blocks (35 %-57 %)**, dealt fresh each window from a shuffled bag |
+| 3-hour average | **38 %-47 %**; measured 43.11 % over 2,000 simulated runs, spread 39.81-45.46 %, none outside |
+| pacing | no more than the pro-rata share of the budget for the part of the window elapsed |
+| your own typing | ticks the same blocks and spends the same budget |
+| pause | stands down entirely while you are using the machine; resumes after **45 s** quiet |
+
+```bash
+# the whole governor read-out for a running engine
+curl -s http://127.0.0.1:4320/status | python3 -m json.tool
 ```
 
 `GET /status` reports the live one, and the console header shows
@@ -60,11 +87,40 @@ ENGINE_ALLOW_WAYLAND=1              # Linux: run on Wayland anyway (XWayland win
 | Method  | Path      | Response                                              |
 |---------|-----------|-------------------------------------------------------|
 | GET     | `/`       | the console page (`console/index.html`)               |
-| GET     | `/status` | `{"status": "IDLE"\|"RUNNING"\|"STOPPING", "backend": "quartz", "platform": "darwin", "inputWorking": true, "warning": null, "mode": null\|"BURST"\|"STANDARD"\|"READING"\|"THINKING"}` (STOPPING = old loop still finishing its step; `mode` is the behaviour profile of the current cycle, `null` unless RUNNING) |
+| GET     | `/status` | see the field table below |
 | POST    | `/start`  | `{"success": true, "message": "Stabilized Engine Activated"}` (or "Engine confirmed running"); **409** `{"success": false, "message": "stopping, try again in a moment"}` while STOPPING; **503** `{"success": false, "message": "<why + fix>", "inputWorking": false}` when input cannot be delivered |
 | POST    | `/stop`   | `{"success": true, "message": "Stabilized Engine Deactivated"}`, `{"success": true, "message": "Already stopping"}` or `{"success": false, "message": "Already idle"}` |
 | OPTIONS | any       | 200 with CORS headers (preflight)                     |
 | *       | other     | 404 `{"error": "not found"}`                          |
+
+### `GET /status` fields
+
+| Field | Meaning |
+|---|---|
+| `status` | `IDLE` / `RUNNING` / `STOPPING` (STOPPING = the old loop is still finishing its step) |
+| `backend`, `platform` | `quartz` / `pynput` / `fake`, and `sys.platform` |
+| `inputWorking`, `warning` | false + text when this session cannot receive synthetic input (Wayland) |
+| `mode` | the current cycle's behaviour profile; `null` when idle, paused or holding |
+| `pausedForUser` | true while standing down because somebody is using the machine |
+| `clickEnabled` | whether `ENGINE_ALLOW_CLICK=1` was set |
+| `maxRunHours` | the run limit in hours (0 = none) |
+| `runSecondsRemaining` | seconds until the run stops itself; `null` when idle or unlimited |
+| `governor` | the object below; `null` unless RUNNING |
+
+`governor`:
+
+| Field | Meaning |
+|---|---|
+| `windowUsedBlocks` / `windowTargetBlocks` | blocks ticked in this 10-minute window, and its budget |
+| `rollingUsedBlocks` | blocks ticked in the last 60 blocks, wherever the boundaries fall |
+| `windowBlocksElapsed` | which of the window's 60 blocks we are in |
+| `windowPercent`, `averagePercent` | this window, and the running average over all windows so far |
+| `windowsCompleted` | how many 10-minute windows have finished |
+| `ceilingBlocks`, `ceilingPercent` | 39 and 65.0 — the limit |
+| `bandPercent` | `[38.0, 47.0]` — the band the average aims for |
+| `holding` | true while the governor is refusing claims (budget spent, or ahead of pace) |
+| `userInputVisible` | false when this platform has no idle timer, so the pause behaviour is inert |
+| `blocksPerWindow`, `blockSeconds` | 60 and 10.0 — the tracker's model |
 
 `POST /start` and `/stop` require the header `X-Engine-Control: 1` — without
 it, or from a browser Origin that is not `http://127.0.0.1[:port]` /
@@ -109,6 +165,8 @@ curl -X POST -H 'X-Engine-Control: 1' http://127.0.0.1:4320/start     # CAREFUL:
 
 ```bash
 echo $XDG_SESSION_TYPE                 # must print x11
+xprintidle                             # the idle timer the pause feature uses (ms); libXss is
+                                       # tried first, via ctypes — no command needed
 xdotool mousemove 500 500              # does synthetic input work at all, outside this tool?
 xinput test-xi2 --root                 # every key/motion event the X server receives
                                        # (xev -root misses XTest keys — they go to the focused window)
@@ -131,7 +189,7 @@ Flag values are Quartz masks, not key codes: `1048576` = `kCGEventFlagMaskComman
 ## Testing it without moving your mouse
 
 ```bash
-make test                                     # unit tests (fake backend) + cadence simulator
+make test                                     # unit tests (fake backend) + 3-hour activity simulator
 ENGINE_BACKEND=fake ENGINE_FAST=1 python3 engine/engine.py    # server + loop, zero real input
 ```
 
