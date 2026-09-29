@@ -1,3 +1,6 @@
 14:59 [DONE] Engine now runs on Windows and Linux too (PR #13, pynput backend); Mac path unchanged, verified; workbench + engine restarted on the new code
 15:47 [DONE] Linux hardened (PR #14): 5 fresh-machine breakages fixed (curl/lsof missing, evdev compile, ensurepip, double-SIGTERM) and Wayland now refuses loudly instead of silently doing nothing
 16:49 [DONE] Linux distro + arch coverage (PR #15): install.sh now prints the right command on apt/dnf/pacman/zypper; pointer proven moving on Ubuntu, Debian, Fedora, Arch, openSUSE across x86_64 and aarch64; 70 tests
+09:19 [DONE] Behaviour profiles added to the engine (PR #17): BURST/STANDARD/READING/THINKING drawn per cycle, mode reported in /status and named on the console
+09:31 [LOGGED] Engine: all five fixes + an activity governor. Requirement: over 3h each 10-min window random, never above 65%, overall average 38-47%. User words: 'Sb fix kr do acche se taaki agr ye chale toh 3hrs mein har 10 min ki window mein activity random ho max 65 tk takki average hmesha overall average 38-47 hi rhe'
+10:55 [DONE] Activity governor merged (PR #18): 43.11% average over 2000 simulated 3-hour runs, 0 outside 38-47, 0 over 65; plus screen-aware movement, pause-on-user, click off by default, 3h limit, real simulator
