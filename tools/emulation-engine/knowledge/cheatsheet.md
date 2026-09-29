@@ -19,6 +19,7 @@ python3 engine/test_metrics.py            # 3-hour activity simulator (virtual c
 python3 engine/test_metrics.py --trials 500 --quiet    # a wider sweep, no per-window listing
 python3 engine/test_metrics.py --human    # and with a person working alongside the engine
 python3 engine/test_metrics.py --seed 7   # a different (still fixed) seed
+python3 engine/test_metrics.py --flagcheck  # "the tightest 90 minutes varied by N points", in plain words
 python3 -m unittest discover -s engine/tests -v   # engine tests (fake backend, no input)
 ENGINE_BACKEND=fake .venv/bin/python engine/engine.py   # real server, no input generated
 ```
@@ -68,9 +69,13 @@ blocks of 10 seconds per 10-minute window, a block ticked by any input at all:
 | | |
 |---|---|
 | hard ceiling | **39 of 60 blocks (65 %)**, never crossed, checked over any rolling 10 minutes |
-| per-window budget | **21-34 blocks (35 %-57 %)**, dealt fresh each window from a shuffled bag |
-| 3-hour average | **38 %-47 %**; measured 43.11 % over 2,000 simulated runs, spread 39.81-45.46 %, none outside |
-| pacing | no more than the pro-rata share of the budget for the part of the window elapsed |
+| per-window budget | **4-38 blocks (7 %-63 %)**, dealt fresh each window from a 9-value bag (`6, 12, 18, 24, 30, 34, 35, 36, 36`, each +/-2) |
+| deal order | a quiet budget AND a busy one in every **4** consecutive windows; neighbours >= 2 blocks apart; any 3 spanning >= 4; all checked across the seam between bags |
+| 3-hour average | **38 %-47 %**; measured 42.78 % over 2,000 simulated runs, spread 40.83-44.35 %, none outside |
+| 90-minute variation | **>= 25 points of range and >= 8 of standard deviation** across any 9 consecutive windows; measured worst 28.3 and 10.0, typical 51.7 |
+| quiet windows | at least one in every four; measured **22.2 %** of all windows under 25 %, lowest ever 6.7 % |
+| pacing | no more than the due share of the budget for the part of the window elapsed, on a per-window shape — front-loaded, even or back-loaded |
+| long pauses | the 40-70 s THINKING absence only happens when the window has slack for it (`gov.pause_is_affordable`), so it lands in the quiet windows |
 | your own typing | ticks the same blocks and spends the same budget |
 | pause | stands down entirely while you are using the machine; resumes after **45 s** quiet |
 
