@@ -229,21 +229,83 @@ Activity trackers do not measure how hard you worked. They cut ten minutes into
 keystroke ticks a block exactly as hard as a hundred. Your score is the
 percentage of blocks ticked.
 
-The engine knows that, and holds itself to three rules:
+The engine knows that, and holds itself to five rules:
 
 | Rule | What it means |
 |---|---|
 | **Never above 65%** | No ten minutes may ever have more than **39 of the 60 blocks** ticked. Not a target — a limit the loop cannot cross, checked on every single action, and checked over *any* ten minutes rather than only the ones lined up with the engine's own clock. |
-| **A different share every window** | Each ten-minute window draws its own budget, between **21 and 34 blocks (35%–57%)**. Two windows in a row genuinely differ. |
-| **38%–47% over three hours** | The long-run average. Measured across 2,000 simulated three-hour runs: average **43.1%**, worst run 39.8%, best 45.5%, **none outside the band** and none over the ceiling. |
+| **A different share every window** | Each ten-minute window gets its own budget, anywhere from **4 to 38 blocks (7%–63%)**. Two windows in a row are never near-identical. |
+| **38%–47% over three hours** | The long-run average. Measured across 2,000 simulated three-hour runs: average **42.8%**, worst run 40.8%, best 44.4%, **none outside the band** and none over the ceiling. |
+| **90 minutes never looks flat** | Across any nine consecutive windows the scores must span at least **25 points** with at least **8 points** of standard deviation. Measured worst over 2,000 runs: **28.3 points** of range and **10.0** of spread; typical stretch **51.7 points**. |
+| **Quiet windows are normal** | At least one window in every four is a genuinely quiet one, and **22.2%** of all windows measured came in under 25%. Windows near 10%, 13%, 17%, 22% and 28% all happen routinely. |
+
+### Why the last two rules exist
+
+A real activity tracker flagged a real person with *"Unusually consistent
+activity — Activity rate varied 1-4% for over 90 minutes."* Their overall rate
+was 45%, and the overall rate was never the complaint. What was flagged was
+that every ten minutes looked like the ten minutes before it.
+
+An earlier version of this engine optimised for exactly the wrong thing. It held
+the average beautifully and drew every window's budget from a narrow band of
+35%–57%. Measured over 2,000 simulated three-hour runs of that version: 99.9% of
+its windows scored between 30% and 60%, it produced a window under 25% just 21
+times in 36,000, and **its tightest ninety minutes varied by 6.7 points, its
+flattest by a standard deviation of 1.7**. That is the flagged person's 1–4
+points. A floor held for three hours is itself the signature: people do not work
+at a rate that never drops.
+
+### The arithmetic, since the numbers look lopsided
+
+Quiet windows have to be paid for by busy ones. If a fraction *f* of windows sit
+at a low rate *L* and the rest at a high rate *H*, then to average 43%:
+
+> *f* · *L* + (1 − *f*) · *H* = 43
+
+With *L* = 15% and *H* = 60%, *f* is about 0.38. With *L* = 10%, about 0.34. So
+**roughly a third of the windows can be genuinely quiet, provided about two
+thirds sit in the high 50s** — and that is why the engine's budgets are weighted
+the way they are. What is *not* achievable, at any setting, is most windows in
+the 10–28% range with a 43% average: that would need the rest to exceed 100%,
+let alone the 65% ceiling. The lopsidedness is arithmetic, not carelessness.
+
+The opposite trap is real too. A third at 10% and two thirds at 60% with nothing
+in between is its own signature, so the budgets include middling values as well.
+Measured over 36,000 windows, every ten-point band from 0% to 63% is populated:
+
+```
+  0-9  %    1591  #######
+ 10-19 %    4016  ##################
+ 20-29 %    3917  #################
+ 30-39 %    4072  ##################
+ 40-49 %    4074  ##################
+ 50-59 %   10980  ##################################################
+ 60-69 %    7350  #################################
+```
 
 Three more things follow from those:
 
-- **It spreads its share across the whole window.** Spending the budget in the
-  first three minutes and lying dead for seven is its own pattern, and a
-  tracker reading a rolling ten minutes would see the spike anyway. The engine
-  compares what it has used against the share due for the part of the window
-  that has actually elapsed, and goes quiet whenever it is ahead.
+- **It spreads its share across the whole window, but not identically every
+  time.** Spending the budget in the first three minutes and lying dead for
+  seven is its own pattern, and a tracker reading a rolling ten minutes would
+  see the spike anyway. The engine compares what it has used against the share
+  due for the part of the window that has actually elapsed, and goes quiet
+  whenever it is ahead. That share is not always a flat line: each window also
+  draws a shape, so some start busy and tail off and some do the reverse.
+  Measured, a tenth of windows put under 35% of their blocks in their first five
+  minutes and a tenth put over 55% there. The busiest windows are paced nearly
+  flat on purpose — back-loading one of those would spend into the next
+  window's first half and run into the rolling ceiling.
+- **The long away-from-the-keyboard pause now asks the window first.** The
+  engine's "THINKING" behaviour disappears for 40–70 seconds, which is four to
+  seven of a window's sixty blocks. It used to do that whatever the window's
+  budget was, and measured, it was the *entire* reason a window fell short of
+  its budget — a window aiming at 60% would score anywhere from 30% to 60%
+  depending on how many pauses happened to land in it, and that was what pushed
+  whole three-hour runs under the 38% floor. Now the pause only happens when
+  the window has the slack for it, which means it lands in the quiet windows.
+  That is also just truer: the ten minutes a person is away from their desk
+  *is* their quiet ten minutes.
 - **Your own typing counts against the same budget.** If you are working, the
   engine is not adding to your score — it is *sharing* it. Without this it
   would pile its activity on top of yours and the combined number would sail
@@ -257,9 +319,18 @@ three hours of the real loop against the real governor on a virtual clock, in
 under a second, and `make test` fails if the calibration has drifted:
 
 ```bash
-python3 engine/test_metrics.py              # one run in detail, then 200 more
-python3 engine/test_metrics.py --trials 500 # a wider sweep
-python3 engine/test_metrics.py --human      # and with a person working alongside it
+python3 engine/test_metrics.py               # one run in detail, then 2,000 more
+python3 engine/test_metrics.py --trials 500  # a quicker sweep
+python3 engine/test_metrics.py --human       # and with a person working alongside it
+python3 engine/test_metrics.py --flagcheck   # just the anti-flatness number, in plain words
+```
+
+`--flagcheck` answers the one question the change above was made for:
+
+```
+  The tightest 90 minutes varied by 28 points.
+  A typical 90 minutes varied by 52 points.
+  The person who got flagged varied by 1 to 4 points.
 ```
 
 ## It pauses while you are using the computer
@@ -343,7 +414,9 @@ served by the engine itself and shows:
   a deliberate quiet minute never reads as a hang;
 - a line reading **"This 10-minute window: 18 of 26 blocks used"**, with a bar
   showing where that sits against the 65% ceiling, the running average against
-  the 38–47% band, and how long is left before the run stops itself;
+  the 38–47% band, and how long is left before the run stops itself. The
+  "of N" moves a lot between windows now — 4 in a quiet one, 38 in a busy one
+  — and that is the point, not a fault;
 - which backend is active, e.g. `backend: pynput on win32`;
 - **Start** and **Stop** buttons, which call `POST /start` and `POST /stop`;
 - a "Last error" line if a call fails;
@@ -385,6 +458,15 @@ immediately — it does not wait the pause out. It is rarer than it used to be
 quiet; what THINKING still adds is one *long* unmistakably human gap, where the
 governor's own quiet is an even trickle.
 
+**THINKING also asks the window whether it can spare the time.** A 40–70 second
+absence is four to seven of a window's sixty blocks, and taking it in a window
+that has committed to 60% activity is how that window ends up scoring 35%
+instead. Measured, that was the whole of the gap between what a window was
+budgeted and what it scored — and the whole reason a busy window's score was
+unpredictable. So the pause now happens where the slack is, which is the quiet
+windows. In a busy one the loop draws a working profile instead. Nothing about
+the pause itself changed; only where it is allowed to land.
+
 The profile is also in `GET /status` as `mode`, and `null` whenever the loop is
 not running.
 
@@ -404,7 +486,7 @@ not running.
 |----------------|--------------------------------------------------------------------------|
 | `make install` | same as `./install.sh`                                                   |
 | `make run`     | same as `./run.sh`                                                       |
-| `make test`    | runs the engine tests on the fake backend, then `engine/test_metrics.py`, which simulates 200 three-hour runs and fails if the activity calibration has drifted; neither generates any input |
+| `make test`    | runs the engine tests on the fake backend, then `engine/test_metrics.py`, which simulates 2,000 three-hour runs and fails if the activity calibration or the window-to-window variation has drifted; neither generates any input |
 | `make bundle`  | zips this folder (without `.venv`) as `emulation-engine-<date>.zip`     |
 
 Windows has no `make`: use `.\install.ps1` and `.\run.ps1` directly, and run
