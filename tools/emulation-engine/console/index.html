@@ -158,6 +158,24 @@
     lastChecked.textContent = 'checked ' + new Date().toLocaleTimeString();
   }
 
+  // What each behaviour profile means, in words rather than a codename. WHY
+  // this is on the page at all: THINKING does nothing for up to 75 seconds by
+  // design, and "RUNNING" beside a pointer that has not moved for a minute
+  // reads as a hang. Naming the profile is the difference between "it is
+  // broken" and "it is pretending to be on a call".
+  var MODE_DETAIL = {
+    BURST:    'Typing hard — a dense burst of keys, then a short pause.',
+    STANDARD: 'Working normally — the usual mix of pointer, keys and scrolling.',
+    READING:  'Reading the screen — only the odd key, with long gaps.',
+    THINKING: 'Away from the keyboard on purpose — nothing will move for up to a minute. This is not a hang.'
+  };
+
+  function runningDetail(mode) {
+    var text = MODE_DETAIL[mode];
+    return text ? mode + ' — ' + text
+                : 'Emulation loop is active — the pointer and keys are being driven.';
+  }
+
   // blocked=true paints it red (input cannot be delivered at all); false paints
   // it amber (input works, but with a caveat worth reading).
   function showNotice(text, blocked) {
@@ -192,7 +210,7 @@
         var blocked = data.inputWorking === false;
         showNotice(data.warning || '', blocked);
         if (blocked) render('BLOCKED', 'Start is disabled — the engine would report RUNNING and move nothing.');
-        else if (data.status === 'RUNNING') render('RUNNING', 'Emulation loop is active — the pointer and keys are being driven.');
+        else if (data.status === 'RUNNING') render('RUNNING', runningDetail(data.mode));
         else if (data.status === 'STOPPING') render('STOPPING', 'Finishing the current step — Start comes back in a moment.');
         else render('IDLE', 'Engine is up and waiting.');
       })
