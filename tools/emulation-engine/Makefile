@@ -16,7 +16,7 @@ BUNDLE := emulation-engine-$(DATE).zip
 help:
 	@echo "make install   create .venv and install the input library (Quartz on macOS, pynput on Linux)"
 	@echo "make run       start the engine and open the console (Ctrl-C stops it); Windows: .\\run.ps1"
-	@echo "make test      run the engine tests on the fake backend and the offline cadence simulator (no input)"
+	@echo "make test      run the engine tests on the fake backend, then the 3-hour activity simulator (no input)"
 	@echo "make bundle    zip this folder, minus .venv, as $(BUNDLE) for sharing"
 
 install:
@@ -28,7 +28,8 @@ run:
 
 test:
 	$(PYTHON) -m unittest discover -s engine/tests -v
-	$(PYTHON) engine/test_metrics.py
+	# Exits non-zero if the governor's calibration has drifted out of the band.
+	$(PYTHON) engine/test_metrics.py --quiet
 
 bundle:
 	rm -f "$(BUNDLE)"

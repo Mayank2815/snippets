@@ -78,6 +78,20 @@
   .notice strong { display: block; margin-bottom: 4px; }
   .notice[hidden] { display: none; }
   .muted { color: var(--muted); font-size: 13px; }
+  /* The governor read-out: the numbers the engine now promises to hold to.
+     A plain block under the status line rather than a card of its own, so it
+     reads as part of "what is it doing right now". */
+  .meter { margin: 16px 0 0; padding: 12px 14px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--border); }
+  .meter[hidden] { display: none; }
+  .meter .line { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; }
+  .meter .line + .line { margin-top: 6px; }
+  .meter .line span:last-child { color: var(--muted); }
+  .bar { height: 8px; border-radius: 999px; background: var(--border); margin: 10px 0 8px; overflow: hidden; position: relative; }
+  .bar i { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+  .bar i.over { background: var(--warn); }
+  /* Where the 65% hard ceiling sits on the bar, so "how close are we" is visible
+     rather than something you have to work out from two numbers. */
+  .bar u { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--err); opacity: 0.8; }
   .pill { font-size: 11px; padding: 3px 9px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); }
   code { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; font-size: 12px; }
 </style>
@@ -102,6 +116,11 @@
       <button id="stop" class="stop" disabled>Stop</button>
       <span class="muted" id="last-checked"></span>
     </div>
+    <div class="meter" id="meter" hidden>
+      <div class="line"><strong id="meter-window">This 10-minute window</strong><span id="meter-target"></span></div>
+      <div class="bar"><i id="meter-fill"></i><u id="meter-ceiling"></u></div>
+      <div class="line"><span id="meter-average"></span><span id="meter-remaining"></span></div>
+    </div>
     <p class="error" id="error"></p>
   </section>
 
@@ -113,6 +132,14 @@
       Once started, the engine moves the pointer and presses navigation keys in whatever window is in front.
       Press Stop here, or Ctrl-C in the terminal, to end it. If nothing moves after Start on a Mac, allow your terminal app under
       System Settings → Privacy &amp; Security → Accessibility; on Linux the engine needs an X11 session, not Wayland.
+    </p>
+    <p class="muted">
+      It keeps its own activity inside a measured band. A tracker scores ten minutes as 60 blocks of ten seconds,
+      counting a block as active if anything happened in it; the engine gives each window a random share of those
+      blocks, never goes above 65% of them, spreads the share across the whole window, and counts
+      <em>your</em> typing against the same share. It stops on its own after a few hours, and it pauses
+      completely while you are using the computer. Clicking is off unless you start it with
+      <code>ENGINE_ALLOW_CLICK=1</code>.
     </p>
   </section>
 </div>
@@ -138,6 +165,13 @@
   var lastChecked = document.getElementById('last-checked');
   var backendLine = document.getElementById('backend-line');
   var notice = document.getElementById('notice');
+  var meter = document.getElementById('meter');
+  var meterWindow = document.getElementById('meter-window');
+  var meterTarget = document.getElementById('meter-target');
+  var meterFill = document.getElementById('meter-fill');
+  var meterCeiling = document.getElementById('meter-ceiling');
+  var meterAverage = document.getElementById('meter-average');
+  var meterRemaining = document.getElementById('meter-remaining');
   var busy = false;
 
   // BLOCKED is not a value the engine ever reports in "status" — the page
@@ -170,9 +204,14 @@
     THINKING: 'Away from the keyboard on purpose — nothing will move for up to a minute. This is not a hang.'
   };
 
-  function runningDetail(mode) {
-    var text = MODE_DETAIL[mode];
-    return text ? mode + ' — ' + text
+  function runningDetail(data) {
+    // Order matters: "you are using this computer" and "waiting for its own
+    // budget" are both states where nothing moves, and both would otherwise
+    // look like the hang the profile names exist to rule out.
+    if (data.pausedForUser) return 'Paused — you are using this computer. It will start again once you have been idle for a minute.';
+    if (data.governor && data.governor.holding) return 'Waiting — it has used its share of this 10-minute window and is staying quiet until the next one.';
+    var text = MODE_DETAIL[data.mode];
+    return text ? data.mode + ' — ' + text
                 : 'Emulation loop is active — the pointer and keys are being driven.';
   }
 
@@ -192,6 +231,42 @@
     notice.appendChild(document.createTextNode(text));
   }
 
+  // "2h 14m", "9m", "40s" — a remaining time nobody has to decode.
+  function readableTime(seconds) {
+    if (seconds === null || seconds === undefined) return '';
+    var total = Math.max(0, Math.round(seconds));
+    var hours = Math.floor(total / 3600);
+    var minutes = Math.floor((total % 3600) / 60);
+    if (hours > 0) return hours + 'h ' + minutes + 'm';
+    if (minutes > 0) return minutes + 'm';
+    return total + 's';
+  }
+
+  // The governor's read-out, in the units the requirement is written in: how
+  // many of this ten-minute window's 60 ten-second blocks have had any input.
+  // WHY it is on the page at all: the engine now makes a specific numeric
+  // promise about how busy it looks, and this is the only surface anyone
+  // watches. A promise nobody can check is not a promise.
+  function renderMeter(data) {
+    var g = data.governor;
+    if (!g) { meter.hidden = true; return; }
+    meter.hidden = false;
+    meterWindow.textContent = 'This 10-minute window: ' + g.windowUsedBlocks +
+      ' of ' + g.windowTargetBlocks + ' blocks used';
+    meterTarget.textContent = g.windowPercent.toFixed(1) + '% \u00b7 ceiling ' +
+      g.ceilingPercent + '%';
+    var percent = Math.min(100, g.windowPercent);
+    meterFill.style.width = percent + '%';
+    meterFill.className = g.windowPercent > g.ceilingPercent ? 'over' : '';
+    meterCeiling.style.left = g.ceilingPercent + '%';
+    meterAverage.textContent = 'Average so far ' + g.averagePercent.toFixed(1) +
+      '% (aiming for ' + g.bandPercent[0] + '-' + g.bandPercent[1] + '%) over ' +
+      (g.windowsCompleted + 1) + ' window' + (g.windowsCompleted === 0 ? '' : 's');
+    meterRemaining.textContent = data.runSecondsRemaining === null
+      ? 'no time limit'
+      : 'stops in ' + readableTime(data.runSecondsRemaining);
+  }
+
   function setError(message) {
     errorLine.textContent = message ? 'Last error: ' + message : '';
   }
@@ -209,13 +284,15 @@
         // so this page still works against one.
         var blocked = data.inputWorking === false;
         showNotice(data.warning || '', blocked);
+        renderMeter(data);
         if (blocked) render('BLOCKED', 'Start is disabled — the engine would report RUNNING and move nothing.');
-        else if (data.status === 'RUNNING') render('RUNNING', runningDetail(data.mode));
+        else if (data.status === 'RUNNING') render('RUNNING', runningDetail(data));
         else if (data.status === 'STOPPING') render('STOPPING', 'Finishing the current step — Start comes back in a moment.');
         else render('IDLE', 'Engine is up and waiting.');
       })
       .catch(function (err) {
         showNotice('', true);
+        meter.hidden = true;
         render('OFFLINE', 'Engine is not answering — start it with ./run.sh (or run.ps1 on Windows) on this computer.');
         if (busy) setError(err.message);
       });
