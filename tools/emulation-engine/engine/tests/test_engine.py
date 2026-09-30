@@ -33,8 +33,6 @@ import engine  # noqa: E402
 from backends.unavailable import UnavailableBackend  # noqa: E402
 
 HEADERS = {engine.CONTROL_HEADER: "1"}
-# The pool as shipped, captured before any test narrows it (see setUp).
-SHIPPED_MODE_POOL = list(engine.MODE_POOL)
 # WHY 3 s / 2 s: a fast-mode cycle is ~0.2 s, so 3 s is a generous ceiling for
 # "at least one call" and 2 s of silence proves the loop is really gone.
 CALL_WAIT_SECONDS = 3
@@ -68,24 +66,12 @@ class EngineHarness(unittest.TestCase):
         self.assertEqual(self.fake.name, "fake")
         self.fake.gate = None
         self.fake.calls.clear()
-        # WHY pin the pool: one draw in six is THINKING, which does no backend
-        # work at all, so a test waiting for "at least one call" could sit
-        # through several of them and fail on timing alone. Tests that care
-        # about THINKING set the pool themselves; everything else runs the
-        # working profiles. use_modes() restores this in tearDown.
-        self._modes_backup = engine.MODE_POOL
-        engine.MODE_POOL = [m for m in engine.MODE_POOL if m != "THINKING"]
-
-    def use_modes(self, *modes):
-        """Force the profiles this test's cycles will draw from."""
-        engine.MODE_POOL = list(modes)
 
     def tearDown(self):
         # Leave every test with the loop stopped and gone.
         self.fake.gate = None
         engine.shutdown_engine()
         self._wait_for_state("IDLE")
-        engine.MODE_POOL = self._modes_backup
 
     # -- helpers -----------------------------------------------------------
 
@@ -157,83 +143,6 @@ class EngineTestCase(EngineHarness):
         self.assertIn("mouse_position", methods)
         self.assertIn("move_mouse", methods)
         self.assertIn(self.fake.calls[0][0], ("mouse_position",))
-
-    # --- behaviour profiles ----------------------------------------------
-
-    def test_every_profile_is_usable_and_ordered(self):
-        """Each profile's ranges are (low, high) and non-negative, so
-        random.randint/uniform cannot raise at three in the morning."""
-        for mode, profile in engine.MODE_PROFILES.items():
-            for field in ("strokes", "key_gap", "cycle_sleep"):
-                low, high = profile[field]
-                self.assertLessEqual(low, high, f"{mode}.{field} is back to front")
-                self.assertGreaterEqual(low, 0, f"{mode}.{field} is negative")
-
-    def test_the_pool_only_names_profiles_that_exist(self):
-        # The shipped pool, not the one setUp narrowed for the other tests.
-        for mode in SHIPPED_MODE_POOL:
-            self.assertIn(mode, engine.MODE_PROFILES)
-        # Every profile should be reachable, or it is dead configuration.
-        self.assertEqual(set(SHIPPED_MODE_POOL), set(engine.MODE_PROFILES))
-        # THINKING must stay rare: it is a minute of nothing.
-        thinking = SHIPPED_MODE_POOL.count("THINKING")
-        self.assertLessEqual(thinking / len(SHIPPED_MODE_POOL), 0.25)
-
-    def test_status_names_the_profile_while_running(self):
-        self.use_modes("READING")
-        self.request("POST", "/start", HEADERS)
-        self.assertTrue(self._wait_for_calls(1))
-        self.assertEqual(self.status()["mode"], "READING")
-
-    def test_status_reports_no_profile_when_idle(self):
-        self.assertIsNone(self.status()["mode"])
-        self.use_modes("BURST")
-        self.request("POST", "/start", HEADERS)
-        self.assertTrue(self._wait_for_calls(1))
-        self.request("POST", "/stop", HEADERS)
-        self._wait_for_state("IDLE")
-        # A stale profile beside IDLE would read as "still working".
-        self.assertIsNone(self.status()["mode"])
-
-    def test_thinking_generates_no_input_at_all(self):
-        """THINKING is the away-from-the-keyboard profile: the whole point is
-        that it makes no calls, and the console must still say it is running."""
-        self.use_modes("THINKING")
-        self.request("POST", "/start", HEADERS)
-        payload = self.status()
-        self.assertEqual(payload["status"], "RUNNING")
-        self.assertEqual(payload["mode"], "THINKING")
-        # Long enough for several fast-mode thinking pauses (0.45-0.75 s each).
-        time.sleep(QUIET_SECONDS)
-        self.assertEqual(self.fake.calls, [], "THINKING generated input")
-        self.assertEqual(self.status()["status"], "RUNNING")
-
-    def test_stop_ends_a_thinking_pause_without_waiting_it_out(self):
-        """stop.wait(), not sleep(): a 45-75 s pause must not delay Stop."""
-        self.use_modes("THINKING")
-        self.request("POST", "/start", HEADERS)
-        self._wait_for_state("RUNNING")
-        started = time.time()
-        self.request("POST", "/stop", HEADERS)
-        self.assertEqual(self._wait_for_state("IDLE"), "IDLE")
-        # A full fast-mode pause is 0.75 s; anything near that means Stop waited.
-        self.assertLess(time.time() - started, 1.0, "Stop waited out the pause")
-
-    def test_burst_types_more_than_reading(self):
-        """The profiles have to actually change the loop, not just be data."""
-        def strokes_in(mode):
-            self.use_modes(mode)
-            self.fake.calls.clear()
-            self.request("POST", "/start", HEADERS)
-            self.assertTrue(self._wait_for_calls(1, method="tap_key"))
-            # One cycle's worth: stop as soon as the burst has been seen.
-            self.request("POST", "/stop", HEADERS)
-            self._wait_for_state("IDLE")
-            return sum(1 for call in self.fake.calls if call[0] == "tap_key")
-
-        # BURST draws 24-36 keystrokes, READING 5-10, so even one cycle each
-        # separates them with a wide margin.
-        self.assertGreater(strokes_in("BURST"), strokes_in("READING"))
 
     def test_stop_ends_the_loop(self):
         self.request("POST", "/start", HEADERS)

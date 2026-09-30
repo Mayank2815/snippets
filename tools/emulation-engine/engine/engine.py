@@ -4,8 +4,7 @@ A tiny HTTP server on 127.0.0.1:4320 exposes the engine:
 
     GET  /         the control console (console/index.html, next to this folder)
     GET  /status   {"status": "IDLE" | "RUNNING" | "STOPPING", "backend": ...,
-                    "platform": ..., "inputWorking": true|false, "warning": null|"...",
-                    "mode": null | "BURST" | "STANDARD" | "READING" | "THINKING"}
+                    "platform": ..., "inputWorking": true|false, "warning": null|"..."}
     POST /start    start the emulation loop in a background thread
                    (503 when inputWorking is false — see below)
     POST /stop     ask the loop to stop after its current step
@@ -113,45 +112,6 @@ SHIFT_MODIFIER = "shift"
 # Global application sequence loop counter
 app_cycle_index = 1
 
-# --- BEHAVIOUR PROFILES -----------------------------------------------------
-# WHY profiles at all: one fixed cadence makes every cycle look the same, and a
-# constant rhythm is the easiest thing in the world to spot. A real person types
-# in bursts, reads slowly, and disappears into a call. The loop now picks one of
-# these per cycle, so the gaps between actions vary the way a person's do.
-#
-# strokes     — how many keystrokes in the burst
-# key_gap     — seconds between keystrokes
-# cycle_sleep — seconds of quiet at the end of the cycle
-MODE_PROFILES = {
-    # Head down and typing: lots of keys, close together, short pause after.
-    "BURST":    {"strokes": (24, 36), "key_gap": (0.08, 0.18), "cycle_sleep": (6.0, 9.0)},
-    # The middle of the road, and what the loop used to do all the time.
-    "STANDARD": {"strokes": (14, 20), "key_gap": (0.12, 0.28), "cycle_sleep": (11.5, 15.5)},
-    # Reading the screen: the odd arrow key, long gaps, a long pause after.
-    "READING":  {"strokes": (5, 10),  "key_gap": (0.30, 0.60), "cycle_sleep": (16.0, 24.0)},
-    # Away from the keyboard entirely — see THINKING_PAUSE below.
-    "THINKING": {"strokes": (0, 0),   "key_gap": (0.0, 0.0),   "cycle_sleep": (0.0, 0.0)},
-}
-
-# WHY these weights (one entry per draw): STANDARD and READING twice each,
-# BURST and THINKING once, so a cycle is about 33% standard, 33% reading,
-# 17% burst and 17% away. A person is rarely bursting and rarely gone.
-MODE_POOL = ["BURST", "STANDARD", "STANDARD", "READING", "READING", "THINKING"]
-
-# WHY 45-75 s: long enough to read as a call or a corridor conversation rather
-# than a pause between keystrokes, and it is what drops the overall activity
-# rate below a flat line. Roughly one cycle in six, so on average about a minute
-# away in every six cycles.
-THINKING_PAUSE = (45.0, 75.0)
-
-# The profile the loop is in right now, or None when it is not running. Read by
-# GET /status. WHY it is reported at all: THINKING does nothing for up to 75
-# seconds, and a console that just says RUNNING while the pointer sits still is
-# indistinguishable from a hang — the exact "looks broken, says fine" problem
-# the Wayland guard exists to prevent. A plain string assignment is atomic in
-# CPython, so this needs no lock.
-current_mode = None
-
 
 def simulate_real_app_switch():
     """Sequential multi-strike layout with sustained hold times to ensure deep background windows swap context"""
@@ -222,25 +182,7 @@ def loop_worker(stop):
     print("[Core Engine] Active Target-Stabilized Emulation Initiated.")
     print("=====================================================")
 
-    global current_mode
-
     while not stop.is_set():
-        # A fresh profile every cycle. Picking per cycle rather than sticking
-        # with one for a while is deliberate: the point is that no two
-        # consecutive cycles have to look alike.
-        current_mode = random.choice(MODE_POOL)
-
-        if current_mode == "THINKING":
-            macro_pause = random.uniform(*THINKING_PAUSE)
-            print(f"  [Behaviour: THINKING] Away from the keyboard for {int(macro_pause)}s.")
-            # WHY stop.wait and not a sleep loop: /stop ends the pause at once
-            # instead of leaving the user waiting out the rest of 75 seconds.
-            stop.wait(macro_pause * SLEEP_SCALE)
-            continue
-
-        profile = MODE_PROFILES[current_mode]
-        print(f"  [Behaviour: {current_mode}] Processing execution matrix wave.")
-
         curr_x, curr_y = backend.mouse_position()
         # WHY ±300 px clamped to x 200..1100, y 200..650: a random hop that stays
         # in the middle of a 13" display (1280x800 points), away from the menu
@@ -250,10 +192,9 @@ def loop_worker(stop):
 
         move_humanlike_adaptive(curr_x, curr_y, target_x, target_y, stop)
 
-        # Both the count and the gap come from this cycle's profile, so the
-        # keyboard burst is 2 s of hammering or 5 s of idle tapping depending
-        # on which one was drawn.
-        strokes = random.randint(*profile["strokes"])
+        # WHY 16-20 strokes at 0.12-0.28 s: a burst of about 3-5 seconds of
+        # keyboard activity per cycle.
+        strokes = random.randint(16, 20)
         for _ in range(strokes):
             if stop.is_set(): break
             # WHY 0.22: roughly one stroke in five is a bare Shift, so the burst
@@ -262,7 +203,7 @@ def loop_worker(stop):
                 backend.tap_key(SHIFT_MODIFIER)
             else:
                 backend.tap_key(random.choice(CORE_DENSE_KEYS))
-            pause(random.uniform(*profile["key_gap"]))
+            pause(random.uniform(0.12, 0.28))
         print(f"  - Distributed {strokes} safe telemetry hits over separate execution ticks.")
 
         # WHY 30 / 30 / 40 %: app switch, browser tab switch and scrolling are
@@ -282,17 +223,15 @@ def loop_worker(stop):
             fx, fy = backend.mouse_position()
             backend.click(fx, fy)
 
-        # The end-of-cycle quiet, again from this cycle's profile. These were
-        # calibrated by hand around the old single cadence (9.5-12.5 s, about
-        # 41-44 % of ten-second windows containing an action); with the profiles
-        # the average is lower and, more to the point, no longer constant.
-        # test_metrics.py models the older single cadence and is not the source
-        # of these numbers — see lessons.md.
+        # --- FINAL PERFECT BRACKET TIMING ADJUSTMENT FOR 41% - 44% RE-LOCK ---
+        # WHY 9.5-12.5 s: with the 3-5 s of activity above, one cycle lasts
+        # about 13-17 s, which the author calibrated by hand so roughly 41-44 %
+        # of ten-second windows contain an action. test_metrics.py is the older
+        # model of this cadence, not the source of these numbers; see lessons.md.
         # WHY stop.wait() and not time.sleep(): /stop wakes the worker at once
-        # instead of leaving it asleep for up to 24 s.
+        # instead of leaving it asleep for up to 12.5 s.
         # WHY the scale: the same ENGINE_FAST factor pause() applies (tests only).
-        stop.wait(random.uniform(*profile["cycle_sleep"]) * SLEEP_SCALE)
-    current_mode = None
+        stop.wait(random.uniform(9.5, 12.5) * SLEEP_SCALE)
     print("[Core Engine] Emulation loop ended.")
 
 
@@ -385,9 +324,6 @@ class EngineBridgeHandler(BaseHTTPRequestHandler):
                 # in this payload cannot reach the person looking at the page.
                 "inputWorking": bool(backend.input_ok),
                 "warning": input_warning(),
-                # None unless a loop is actually running, so a stale mode from
-                # the last run can never be shown next to IDLE.
-                "mode": current_mode if state == "RUNNING" else None,
             })
         elif path in ('/', '/index.html'):
             self._send_console()

@@ -225,40 +225,18 @@ served by the engine itself and shows:
   **OFFLINE** (engine not answering), **IDLE** (up, waiting), **RUNNING**
   (driving input right now) or **Stopping…** (you pressed Stop and the loop is
   finishing its current step — both buttons stay off until it has);
-- while it runs, which behaviour profile the current cycle drew, in words —
-  so a deliberate quiet minute does not read as a hang (see below);
 - which backend is active, e.g. `backend: pynput on win32`;
 - **Start** and **Stop** buttons, which call `POST /start` and `POST /stop`;
 - a "Last error" line if a call fails;
 - when it last checked.
 
 Once you press Start, the engine takes over the pointer and keyboard of the
-window in front: a curved mouse move, a burst of arrow/Shift presses, then one
-of an app switch (Cmd+Tab on macOS, Alt+Tab elsewhere), a browser-tab switch
-(Cmd+Option+Right on macOS, Ctrl+Tab elsewhere) or a scroll, and an occasional
-click. Press **Stop** to end the loop; the current step finishes first, so
-allow a couple of seconds.
-
-### Behaviour profiles
-
-A person does not work at one constant rhythm, so neither does the loop. Every
-cycle draws a profile at random, and the profile decides how much typing there
-is and how long the quiet afterwards lasts:
-
-| Profile | Keystrokes | Gap between keys | Quiet after the cycle | How often |
-|---|---|---|---|---|
-| **BURST** | 24–36 | 0.08–0.18 s | 6–9 s | 1 in 6 |
-| **STANDARD** | 14–20 | 0.12–0.28 s | 11.5–15.5 s | 2 in 6 |
-| **READING** | 5–10 | 0.30–0.60 s | 16–24 s | 2 in 6 |
-| **THINKING** | none | — | 45–75 s away | 1 in 6 |
-
-**THINKING does nothing on purpose.** For up to 75 seconds nothing moves, as if
-you had stepped away or taken a call. The console says so in plain words while
-it happens, so it is never mistaken for a crash, and **Stop** still responds
-immediately — it does not wait the pause out.
-
-The profile is also in `GET /status` as `mode`, and `null` whenever the loop is
-not running.
+window in front: a curved mouse move, a short burst of arrow/Shift presses,
+then one of an app switch (Cmd+Tab on macOS, Alt+Tab elsewhere), a browser-tab
+switch (Cmd+Option+Right on macOS, Ctrl+Tab elsewhere) or a scroll, an
+occasional click, and a 9.5–12.5 second pause before the next cycle. Press
+**Stop** to end the loop; the current step finishes first, so allow a couple of
+seconds.
 
 ## Stopping it
 
