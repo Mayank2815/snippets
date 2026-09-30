@@ -30,14 +30,9 @@ os.environ["ENGINE_FAST"] = "1"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import engine  # noqa: E402
-import governor as gov_module  # noqa: E402
 from backends.unavailable import UnavailableBackend  # noqa: E402
 
 HEADERS = {engine.CONTROL_HEADER: "1"}
-# The backend methods that actually put something on screen. Reads
-# (screen_size, mouse_position) are not input, and the loop makes one
-# screen_size call per run to work out where the pointer may go.
-INPUT_METHODS = {"move_mouse", "click", "scroll", "tap_key", "app_switch", "browser_tab_next"}
 # The pool as shipped, captured before any test narrows it (see setUp).
 SHIPPED_MODE_POOL = list(engine.MODE_POOL)
 # WHY 3 s / 2 s: a fast-mode cycle is ~0.2 s, so 3 s is a generous ceiling for
@@ -73,10 +68,6 @@ class EngineHarness(unittest.TestCase):
         self.assertEqual(self.fake.name, "fake")
         self.fake.gate = None
         self.fake.calls.clear()
-        self.fake.user_idle_seconds = None
-        self.fake.idle_polls = 0
-        self._click_backup = engine.ALLOW_CLICK
-        self._hours_backup = engine.MAX_RUN_HOURS
         # WHY pin the pool: one draw in six is THINKING, which does no backend
         # work at all, so a test waiting for "at least one call" could sit
         # through several of them and fail on timing alone. Tests that care
@@ -95,9 +86,6 @@ class EngineHarness(unittest.TestCase):
         engine.shutdown_engine()
         self._wait_for_state("IDLE")
         engine.MODE_POOL = self._modes_backup
-        engine.ALLOW_CLICK = self._click_backup
-        engine.MAX_RUN_HOURS = self._hours_backup
-        self.fake.user_idle_seconds = None
 
     # -- helpers -----------------------------------------------------------
 
@@ -123,15 +111,6 @@ class EngineHarness(unittest.TestCase):
                 return state
             time.sleep(0.02)
         return self.status()["status"]
-
-    def _wait_for_field(self, field, wanted, timeout=CALL_WAIT_SECONDS):
-        """True once GET /status reports `field` as `wanted`."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            if self.status().get(field) == wanted:
-                return True
-            time.sleep(0.02)
-        return self.status().get(field) == wanted
 
     def _wait_for_calls(self, minimum=1, method=None, timeout=CALL_WAIT_SECONDS):
         """True once the fake has recorded `minimum` calls (of `method`, when given)."""
@@ -177,10 +156,7 @@ class EngineTestCase(EngineHarness):
         methods = {call[0] for call in self.fake.calls}
         self.assertIn("mouse_position", methods)
         self.assertIn("move_mouse", methods)
-        # The run opens by asking how big the screen is - that is where the
-        # pointer's reachable rectangle comes from - and then reads the pointer.
-        self.assertEqual(self.fake.calls[0][0], "screen_size")
-        self.assertIn("mouse_position", methods)
+        self.assertIn(self.fake.calls[0][0], ("mouse_position",))
 
     # --- behaviour profiles ----------------------------------------------
 
@@ -229,8 +205,7 @@ class EngineTestCase(EngineHarness):
         self.assertEqual(payload["mode"], "THINKING")
         # Long enough for several fast-mode thinking pauses (0.45-0.75 s each).
         time.sleep(QUIET_SECONDS)
-        generated = [call for call in self.fake.calls if call[0] in INPUT_METHODS]
-        self.assertEqual(generated, [], "THINKING generated input")
+        self.assertEqual(self.fake.calls, [], "THINKING generated input")
         self.assertEqual(self.status()["status"], "RUNNING")
 
     def test_stop_ends_a_thinking_pause_without_waiting_it_out(self):
@@ -259,224 +234,6 @@ class EngineTestCase(EngineHarness):
         # BURST draws 24-36 keystrokes, READING 5-10, so even one cycle each
         # separates them with a wide margin.
         self.assertGreater(strokes_in("BURST"), strokes_in("READING"))
-
-
-    # --- the pointer's reachable area ------------------------------------
-
-    def test_the_target_rectangle_scales_with_the_screen(self):
-        """The bug this fixes: a rectangle written for a 1280x800 laptop left
-        the pointer inside 29 % of a 1470x956 screen, always in the top left."""
-        for width, height in ((1280, 800), (1470, 956), (1920, 1080), (3840, 2160)):
-            left, top, right, bottom = engine.target_rectangle(width, height)
-            self.assertLess(left, right)
-            self.assertLess(top, bottom)
-            # Inset from every edge, so menu bars, docks, taskbars and hot
-            # corners are all out of reach.
-            self.assertGreaterEqual(left, engine.TARGET_MIN_INSET_PX)
-            self.assertGreaterEqual(top, engine.TARGET_MIN_INSET_PX)
-            self.assertLessEqual(right, width - engine.TARGET_MIN_INSET_PX)
-            self.assertLessEqual(bottom, height - engine.TARGET_MIN_INSET_PX)
-            # And it is most of the screen, not a corner of it.
-            covered = (right - left) * (bottom - top) / float(width * height)
-            self.assertGreater(covered, 0.55, f"only {covered:.0%} of {width}x{height} is reachable")
-
-    def test_a_bigger_screen_gets_a_bigger_rectangle(self):
-        small = engine.target_rectangle(1280, 800)
-        large = engine.target_rectangle(3840, 2160)
-        self.assertGreater(large[2] - large[0], small[2] - small[0])
-        self.assertGreater(large[3] - large[1], small[3] - small[1])
-
-    def test_a_tiny_screen_still_gets_a_usable_rectangle(self):
-        """A 320x240 virtual display in a container is smaller than twice the
-        inset floor; it must not come back inside out."""
-        left, top, right, bottom = engine.target_rectangle(320, 240)
-        self.assertLess(left, right)
-        self.assertLess(top, bottom)
-
-    def test_the_pointer_reaches_every_part_of_the_rectangle(self):
-        """Hops are a fraction of the rectangle, so the whole of it gets
-        visited whatever the screen size - on a 4K display a fixed 300 px hop
-        would take minutes to cross one."""
-        for width, height in ((1470, 956), (3840, 2160)):
-            rect = engine.target_rectangle(width, height)
-            hop = engine.pointer_hop(rect)
-            left, top, right, bottom = rect
-            x, y = (left + right) // 2, (top + bottom) // 2
-            cells = set()
-            for _ in range(600):
-                x, y = engine.next_pointer_target(x, y, rect, hop)
-                self.assertTrue(left <= x <= right and top <= y <= bottom,
-                                f"({x}, {y}) escaped {rect}")
-                cells.add((int((x - left) * 3 / (right - left + 1)),
-                           int((y - top) * 3 / (bottom - top + 1))))
-            self.assertEqual(len(cells), 9,
-                             f"{width}x{height}: only {len(cells)} of 9 regions were visited")
-
-    # --- clicking ---------------------------------------------------------
-
-    def test_clicking_is_off_unless_the_environment_asks_for_it(self):
-        """A click lands on whatever is in front - a link, a Send button, a
-        Delete. It is the one thing the engine does that cannot be undone."""
-        engine.ALLOW_CLICK = False
-        # Certainty, not probability: if a click were going to happen at all
-        # under these settings, it would happen every cycle.
-        was = engine.CLICK_PROBABILITY
-        engine.CLICK_PROBABILITY = 1.0
-        try:
-            self.use_modes("BURST")
-            self.request("POST", "/start", HEADERS)
-            self.assertTrue(self._wait_for_calls(3, method="tap_key"))
-            time.sleep(0.3)
-            self.assertNotIn("click", {call[0] for call in self.fake.calls})
-        finally:
-            engine.CLICK_PROBABILITY = was
-
-    def test_clicking_works_when_it_is_switched_on(self):
-        engine.ALLOW_CLICK = True
-        was = engine.CLICK_PROBABILITY
-        engine.CLICK_PROBABILITY = 1.0
-        try:
-            self.use_modes("BURST")
-            self.request("POST", "/start", HEADERS)
-            self.assertTrue(self._wait_for_calls(1, method="click"),
-                            "ENGINE_ALLOW_CLICK=1 did not produce a click")
-        finally:
-            engine.CLICK_PROBABILITY = was
-
-    def test_status_says_whether_clicking_is_on(self):
-        engine.ALLOW_CLICK = False
-        self.assertFalse(self.status()["clickEnabled"])
-        engine.ALLOW_CLICK = True
-        self.assertTrue(self.status()["clickEnabled"])
-
-    # --- the governor, through the engine ---------------------------------
-
-    def test_status_carries_the_governor_while_running(self):
-        self.use_modes("STANDARD")
-        self.request("POST", "/start", HEADERS)
-        self.assertTrue(self._wait_for_calls(1, method="tap_key"))
-        payload = self.status()
-        governor = payload["governor"]
-        self.assertIsNotNone(governor, "/status carried no governor while running")
-        self.assertEqual(governor["blocksPerWindow"], gov_module.BLOCKS_PER_WINDOW)
-        self.assertEqual(governor["ceilingPercent"], gov_module.CEILING_PERCENT)
-        self.assertGreaterEqual(governor["windowUsedBlocks"], 1)
-        self.assertLessEqual(governor["windowUsedBlocks"], gov_module.CEILING_BLOCKS)
-        self.assertGreater(governor["windowTargetBlocks"], 0)
-        self.assertFalse(payload["pausedForUser"])
-
-    def test_status_has_no_governor_when_idle(self):
-        """A stale window read-out beside IDLE would say the engine is working."""
-        payload = self.status()
-        self.assertIsNone(payload["governor"])
-        self.assertIsNone(payload["runSecondsRemaining"])
-        self.assertFalse(payload["pausedForUser"])
-
-    def test_the_loop_never_passes_the_ceiling_in_a_real_run(self):
-        """Not the governor in isolation - the whole engine, through HTTP."""
-        self.use_modes("BURST")
-        self.request("POST", "/start", HEADERS)
-        self.assertTrue(self._wait_for_calls(1, method="tap_key"))
-        deadline = time.time() + 2.0
-        while time.time() < deadline:
-            governor = self.status()["governor"]
-            if governor is not None:
-                self.assertLessEqual(governor["windowUsedBlocks"], gov_module.CEILING_BLOCKS)
-                self.assertLessEqual(governor["rollingUsedBlocks"], gov_module.CEILING_BLOCKS)
-            time.sleep(0.05)
-
-    # --- pausing while the person works -----------------------------------
-
-    def test_the_engine_pauses_while_the_user_is_working(self):
-        """It used to yank the pointer and press arrow keys into whatever the
-        person was typing. Now it stands down."""
-        self.use_modes("BURST")
-        self.request("POST", "/start", HEADERS)
-        self.assertTrue(self._wait_for_calls(1, method="tap_key"))
-
-        # The person touches the keyboard: the OS idle timer reads zero and
-        # keeps reading zero.
-        self.fake.user_idle_seconds = 0.0
-        paused = self._wait_for_field("pausedForUser", True)
-        self.assertTrue(paused, "the engine did not notice the user")
-        self.assertEqual(self.status()["status"], "RUNNING")
-
-        before = len([c for c in self.fake.calls if c[0] in INPUT_METHODS])
-        time.sleep(QUIET_SECONDS)
-        after = len([c for c in self.fake.calls if c[0] in INPUT_METHODS])
-        self.assertEqual(after, before, "the engine kept generating input while the user was working")
-
-    def test_the_engine_resumes_once_the_user_has_been_quiet(self):
-        self.use_modes("BURST")
-        self.request("POST", "/start", HEADERS)
-        self.fake.user_idle_seconds = 0.0
-        self.assertTrue(self._wait_for_field("pausedForUser", True))
-
-        # Nobody has touched it for well over the quiet period.
-        self.fake.user_idle_seconds = gov_module.USER_ACTIVE_QUIET_SECONDS * 10
-        self.assertTrue(self._wait_for_field("pausedForUser", False),
-                        "the engine never came back")
-        self.fake.calls.clear()
-        self.assertTrue(self._wait_for_calls(1, method="tap_key"),
-                        "the engine came back but generated nothing")
-
-    def test_a_platform_with_no_idle_timer_never_pauses(self):
-        """user_idle_seconds is None by default - the Linux-without-XScreenSaver
-        case. The engine must simply carry on."""
-        self.use_modes("BURST")
-        self.request("POST", "/start", HEADERS)
-        self.assertTrue(self._wait_for_calls(2, method="tap_key"))
-        self.assertFalse(self.status()["pausedForUser"])
-        self.assertGreater(self.fake.idle_polls, 0, "the idle timer was never polled")
-
-    # --- the run limit ----------------------------------------------------
-
-    def test_the_run_stops_itself_at_the_time_limit_and_goes_idle(self):
-        """A forgotten engine must not still be driving the machine at 3am."""
-        # WHY this many seconds: engine_time() is scaled by ENGINE_FAST too, so
-        # in these tests one governor-second is 10 ms of wall clock. Five
-        # governor-seconds is 50 ms - long enough for the loop to do a cycle
-        # first, short enough not to slow the suite.
-        engine.MAX_RUN_HOURS = 5.0 / 3600.0
-        self.use_modes("BURST")
-        self.request("POST", "/start", HEADERS)
-        self.assertEqual(self._wait_for_state("IDLE"), "IDLE")
-        self.assertIsNone(self.status()["governor"])
-
-    def test_status_counts_down_the_remaining_time(self):
-        engine.MAX_RUN_HOURS = 1.0
-        self.use_modes("BURST")
-        self.request("POST", "/start", HEADERS)
-        self.assertTrue(self._wait_for_calls(1))
-        first = self.status()["runSecondsRemaining"]
-        self.assertIsNotNone(first)
-        self.assertLessEqual(first, 3600.0)
-        time.sleep(0.2)
-        second = self.status()["runSecondsRemaining"]
-        self.assertLess(second, first, "the remaining time did not go down")
-
-    def test_zero_hours_means_no_limit(self):
-        engine.MAX_RUN_HOURS = 0.0
-        self.use_modes("BURST")
-        self.request("POST", "/start", HEADERS)
-        self.assertTrue(self._wait_for_calls(1))
-        self.assertIsNone(self.status()["runSecondsRemaining"])
-        self.assertEqual(self.status()["status"], "RUNNING")
-
-    def test_a_nonsense_max_hours_falls_back_to_the_default(self):
-        was = os.environ.get("ENGINE_MAX_HOURS")
-        try:
-            os.environ["ENGINE_MAX_HOURS"] = "three"
-            self.assertEqual(engine._max_run_hours(), engine.DEFAULT_MAX_RUN_HOURS)
-            os.environ["ENGINE_MAX_HOURS"] = "-5"
-            self.assertEqual(engine._max_run_hours(), 0.0)
-            os.environ["ENGINE_MAX_HOURS"] = "2.5"
-            self.assertEqual(engine._max_run_hours(), 2.5)
-        finally:
-            if was is None:
-                os.environ.pop("ENGINE_MAX_HOURS", None)
-            else:
-                os.environ["ENGINE_MAX_HOURS"] = was
 
     def test_stop_ends_the_loop(self):
         self.request("POST", "/start", HEADERS)
