@@ -40,25 +40,11 @@ One process, two threads, one HTML file, one input backend per platform.
  +----------------------------------------------------------------------+
 ```
 
-## Behaviour profiles
-
-`MODE_POOL` and `MODE_PROFILES` in `engine.py` drive one draw per cycle. Three
-profiles differ only in numbers (how many keystrokes, the gap between them, the
-quiet afterwards) and run the normal cycle; `THINKING` is the exception and
-returns before any backend call, waiting 45-75 s on the worker's own stop event
-so `/stop` still ends it at once.
-
-The drawn profile is published in `GET /status` as `mode` and rendered by the
-console in words. That is not decoration: `THINKING` produces no input for up
-to a minute, and `RUNNING` next to a still pointer is the same "says fine,
-looks broken" shape as the Wayland failure below. Naming the profile is what
-separates the two for whoever is watching the page.
-
 ## The backend layer
 
-`engine.py` holds the loop — the behaviour profiles, the probabilities, the
-target rectangle, every timing constant — and never talks to the operating
-system directly. Everything platform-specific sits behind one object obtained once at
+`engine.py` holds the loop — the cadence, the probabilities, the target
+rectangle, every timing constant — and never talks to the operating system
+directly. Everything platform-specific sits behind one object obtained once at
 import time:
 
 ```python

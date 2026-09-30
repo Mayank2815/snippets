@@ -60,7 +60,7 @@ ENGINE_ALLOW_WAYLAND=1              # Linux: run on Wayland anyway (XWayland win
 | Method  | Path      | Response                                              |
 |---------|-----------|-------------------------------------------------------|
 | GET     | `/`       | the console page (`console/index.html`)               |
-| GET     | `/status` | `{"status": "IDLE"\|"RUNNING"\|"STOPPING", "backend": "quartz", "platform": "darwin", "inputWorking": true, "warning": null, "mode": null\|"BURST"\|"STANDARD"\|"READING"\|"THINKING"}` (STOPPING = old loop still finishing its step; `mode` is the behaviour profile of the current cycle, `null` unless RUNNING) |
+| GET     | `/status` | `{"status": "IDLE"\|"RUNNING"\|"STOPPING", "backend": "quartz", "platform": "darwin", "inputWorking": true, "warning": null}` (STOPPING = old loop still finishing its step) |
 | POST    | `/start`  | `{"success": true, "message": "Stabilized Engine Activated"}` (or "Engine confirmed running"); **409** `{"success": false, "message": "stopping, try again in a moment"}` while STOPPING; **503** `{"success": false, "message": "<why + fix>", "inputWorking": false}` when input cannot be delivered |
 | POST    | `/stop`   | `{"success": true, "message": "Stabilized Engine Deactivated"}`, `{"success": true, "message": "Already stopping"}` or `{"success": false, "message": "Already idle"}` |
 | OPTIONS | any       | 200 with CORS headers (preflight)                     |

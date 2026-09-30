@@ -480,16 +480,3 @@ own keymap.
 
 - **The server is single-threaded.** Fine for a 2 s poll, but do not put slow
   work in a handler — it would block `/stop`.
-
-- **2026-09-29. The loop ran at one fixed cadence, which is its own tell.** Every
-  cycle was 16-20 keystrokes and a 9.5-12.5 s pause, so the gaps between actions
-  were near-constant — the easiest possible pattern to spot. Replaced with four
-  profiles drawn per cycle (BURST, STANDARD, READING, THINKING) so the rhythm
-  varies the way a person's does. Two things this changed that were not obvious
-  up front: (1) `THINKING` does nothing for 45-75 s, which on a console that only
-  said "RUNNING" is indistinguishable from a hang, so the profile is now reported
-  in `/status` and named in plain words on the page; (2) the old "41-44 % of
-  ten-second windows" calibration no longer describes the loop as a whole, and
-  `test_metrics.py` models the old single cadence only. The unit tests pin the
-  pool to the working profiles, because one draw in six doing nothing made any
-  test that waited for a backend call flaky on timing alone.
