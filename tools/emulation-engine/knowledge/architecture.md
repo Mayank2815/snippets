@@ -13,10 +13,7 @@ One process, two threads, one HTML file, one input backend per platform.
  |      GET  /          -> reads ../console/index.html, serves it       |
  |      GET  /status    -> {"status": IDLE|RUNNING|STOPPING,            |
  |                          "backend": "quartz", "platform": "darwin",  |
- |                          "inputWorking": true, "warning": null,      |
- |                          "mode": ..., "pausedForUser": false,        |
- |                          "governor": {...}, "clickEnabled": false,   |
- |                          "runSecondsRemaining": 9123.4}              |
+ |                          "inputWorking": true, "warning": null}      |
  |      POST /start     -> new stop Event + loop_worker thread; 409     |
  |                         while the previous worker is still alive;    |
  |                         503 when the backend cannot deliver input    |
@@ -26,17 +23,7 @@ One process, two threads, one HTML file, one input backend per platform.
  |      SIGTERM/Ctrl-C  -> stop, join worker 2 s, release modifiers     |
  |                                                                      |
  |  engine thread (daemon): loop_worker(stop) while not stop.is_set()   |
- |      every action is gated by governor.claim() ---------+            |
  |      every OS call goes through the backend object ------------+     |
- |                                                        |       |     |
- |  +----------------- engine/governor.py ----------------v-+     |     |
- |  | ActivityGovernor(clock, read_idle, rng)               |     |     |
- |  |   claim()                may the engine act right now?|     |     |
- |  |   observe_user_input()   was that the PERSON typing?  |     |     |
- |  |   user_is_active()       then stand down entirely     |     |     |
- |  |   snapshot()             what /status and the console |     |     |
- |  |                          show                         |     |     |
- |  +-------------------------------------------------------+     |     |
  +----------------------------------------------------------------|-----+
                                                                   v
  +--------------------- engine/backends/ (get_backend()) ---------------+
@@ -66,166 +53,6 @@ console in words. That is not decoration: `THINKING` produces no input for up
 to a minute, and `RUNNING` next to a still pointer is the same "says fine,
 looks broken" shape as the Wayland failure below. Naming the profile is what
 separates the two for whoever is watching the page.
-
-## The activity governor
-
-`engine/governor.py`. This is the part that makes the tool's central promise
-true by construction rather than by hoping.
-
-### What a tracker actually measures
-
-Not effort — **boxes**. Ten minutes is cut into 60 blocks of ten seconds, and a
-block is "active" if any input at all arrived during it. One keystroke ticks a
-block exactly as hard as a hundred. Your score is the percentage ticked. Every
-number in this module is in those units, because reasoning in any other unit
-would be reasoning about the wrong thing.
-
-### The four rules
-
-1. **A hard ceiling (`CEILING_BLOCKS` = 39, i.e. 65 %).** Checked on every
-   claim, separately from the window target, so it survives any retuning of the
-   draw. It is checked over a **rolling** ten minutes, not only the windows the
-   engine lines up with — a tracker does not have to share our clock.
-2. **A random budget per window, from a shuffled bag.** `WINDOW_TARGET_BAG`
-   holds six budgets (22-33 blocks, 37 %-55 %); they are dealt in random order
-   and the bag is refilled and reshuffled when empty, and each is nudged by
-   ±1 block of jitter. Each window is a surprise; any six consecutive windows
-   average the bag's own mean.
-3. **Pacing.** At block *e* of 60, at most `ceil(target x e / 60)` blocks may
-   have been spent. Front-loading is its own pattern and would fail a rolling
-   read anyway.
-4. **The person's input counts against the same budget.** Otherwise the engine
-   adds to a score that is already being earned, and the combined figure leaves
-   the band from below.
-
-### Telling the person's input from the engine's own
-
-There is no API anywhere that says "the user did this". Every platform offers
-one number — seconds since the last input of *any* kind — and the engine's own
-synthetic events reset it exactly as real ones do. So the separation is by
-timestamp:
-
-```
-last_input_at = now - backend.seconds_since_user_input()
-it_was_the_person  <=>  last_input_at > engine_last_input_at + MARGIN
-```
-
-Two details make that work, and getting either wrong is fatal in an obvious
-way. An engine that reads its own input as the user's pauses **forever**; one
-that never notices the user **never pauses**.
-
-- `note_engine_input()` stamps the engine's clock **after** each backend call
-  returns, not before. An app switch holds a modifier for up to two seconds and
-  the OS stamps its idle timer at the end of that; with the stamp taken first,
-  the engine would read its own switch as somebody sitting down.
-- `begin()` stamps the engine's clock at the moment the run starts. Pressing
-  Start in the console *is* user input, and so is the keystroke that launched
-  `run.sh` — without this the engine pauses the instant it starts, which reads
-  exactly like a broken button.
-
-The consequence worth knowing: the engine can only see the person during its
-**own quiet stretches**. Mid-burst, its events mask theirs. That is not worth
-closing — the loop is quiet for most of every cycle, and a masked keystroke
-lands in a block the engine is ticking anyway. Measured in simulation, about
-one human block in ten is missed this way.
-
-### Pacing stops front-loading; only the rolling check stops catch-up
-
-Pro-rata pacing limits running *ahead*. It does not limit running *behind* and
-then catching up — and a window whose first half was a long quiet pause is
-entitled to spend its whole budget in the second half. Put two such windows
-side by side and the ten minutes spanning the boundary holds 45 ticked blocks
-(75 %) while **both fixed windows read comfortably under the ceiling**. Measured
-at exactly that before `_rolling_used()` existed. Hence rule 1 being a rolling
-check: it is the only form of the ceiling that means what the requirement says.
-
-### Where the numbers came from
-
-`engine/test_metrics.py` steps a virtual clock through three simulated hours of
-the real loop driving the real governor, and does it hundreds of times in about
-a second. Every constant it uses is imported from `engine.py` and
-`governor.py`; it declares none of its own. Measured over 2,000 runs at the
-shipped settings: average **43.11 %**, spread 39.81 %-45.46 %, sd 0.83, worst
-single window 56.7 %, worst rolling window 65.0 %, **none outside the 38-47 %
-band and none over the ceiling**.
-
-### Why the profiles were retuned at the same time
-
-If the loop's own unconstrained rate sits near the target, the governor barely
-binds and the activity rate goes back to being an accident of the profile mix.
-Measured: with the old cycle_sleep ranges the loop's natural rate was 51 %
-against a target averaging 46 %, and the three-hour average came out at 40.2 %
-with runs as low as 35.1 %. With the shorter ranges it is 70 % against the same
-target, the governor binds everywhere, and the average is where it was tuned to
-be. THINKING dropped from one draw in six to one in ten for the same reason: it
-used to be the mechanism that held the rate down, the governor is that now, and
-at one in six it cost about two and a half points of the average by throwing
-away pro-rata opportunity that had already been granted.
-
-## Pausing while the person works
-
-`loop_worker` polls `governor.observe_user_input()` once a second — at the top
-of every iteration and inside every wait, via `quiet_wait()`, which is why a
-45-second THINKING pause does not delay noticing somebody sitting down. While
-`user_is_active()` the loop generates nothing at all, `/status` says
-`pausedForUser: true`, and the console says "Paused — you are using this
-computer". It resumes after `USER_ACTIVE_QUIET_SECONDS` (45 s) of real quiet.
-
-The person's blocks still tick the budget throughout, so the score is shared
-rather than stacked.
-
-`seconds_since_user_input()` is part of the backend contract:
-
-| Platform | How |
-|---|---|
-| macOS | `CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateCombinedSessionState, kCGAnyInputEventType)` — the combined state sees hardware and posted events alike, which is what "has anything happened here" means |
-| Windows | `GetLastInputInfo` against `GetTickCount`, masked to 32 bits so the 49.7-day wrap does not produce a negative |
-| Linux | the X server's XScreenSaver idle timer through `ctypes`, falling back to the `xprintidle` command |
-| fake | a settable value, `None` by default |
-
-**`None` must stay an option.** A Linux box with neither XScreenSaver nor
-xprintidle genuinely cannot answer, and guessing a number there would make the
-engine pause at random. `None` means the engine never pauses, and
-`/status` carries `userInputVisible: false` so the console can say so rather
-than implying a feature is working when it is inert.
-
-## The run limit
-
-A run stops itself after `MAX_RUN_HOURS` (`ENGINE_MAX_HOURS`, default 3; 0
-disables it). `loop_worker` checks the deadline at the top of each iteration and
-returns, which leaves `engine_state()` reporting IDLE because the thread is
-gone. `/status` carries `runSecondsRemaining` and the console renders it as
-"stops in 2h 41m".
-
-Three hours is the span the activity band is specified and simulated over, so it
-is also the span over which the engine's promises about its own numbers have
-actually been measured. `tools/keep-alive` solved the identical problem the
-identical way and for the identical reason: an idle limit exists to save
-something, and a forgotten toggle should not be able to defeat it.
-
-## Where the pointer may go
-
-`target_rectangle(width, height)` derives the reachable area from the real
-screen: 10 % in from each edge with a 60 px floor, which clears the macOS menu
-bar and Dock, the Windows taskbar and every desktop's hot corners at any size,
-and leaves about 64 % of the screen reachable. `pointer_hop()` scales the hop
-between targets to 35 % of the rectangle, so crossing a 4K display takes the
-same handful of hops a laptop one does. Both are separate functions precisely so
-a test can iterate `next_pointer_target()` a few hundred times and assert that
-all nine regions of a 3x3 grid really do get visited.
-
-The old rectangle was a fixed `x 200-1100, y 200-650`, written for a 13"
-1280x800 display: 29 % of a 1470x956 screen, all of it top-left, and less again
-on anything larger.
-
-## Clicking
-
-`ALLOW_CLICK` (`ENGINE_ALLOW_CLICK=1`) is **off** by default. Everything else
-the loop does is reversible; a click is not — it lands on whatever is in front,
-which can be a link, a Send button, a tab's close box or a Delete in a dialog.
-The code path and its tests stay, because on a screen someone has deliberately
-parked on something blank it is the most human thing in the loop. `/status`
-reports `clickEnabled` so the console can say which it is.
 
 ## The backend layer
 
@@ -300,15 +127,6 @@ between calls, so a hanging backend call makes `/stop` hang too.
 The loop refers to keys by **name** (`'left'`, `'right'`, `'up'`, `'down'`,
 `'tab'`, `'shift'`) and each backend maps those to its own codes. That is what
 let the macOS key-code table move out of the loop without changing behaviour.
-
-### The clock scale
-
-`engine_time()` is `time.monotonic()` divided by `SLEEP_SCALE`. The governor
-measures ten-second blocks of wall time, and `ENGINE_FAST=1` shrinks every sleep
-in the loop by 100; left on the real clock, a whole fast-mode test run would sit
-inside a single block and the governor would behave nothing like it does in
-production. Dividing by the same factor keeps the governor's blocks in exactly
-the same proportion to the loop's cadence at either speed.
 
 ### The sleep scale
 
@@ -416,33 +234,17 @@ can call the same path the signal handler does.
 
 ## The loop (`loop_worker`)
 
-Once per run: read the screen size, derive the reachable rectangle and the hop
-size, and set the deadline.
+Each cycle:
 
-Each iteration:
-
-0. Poll the idle timer. If the person is working, stand down and poll again in
-   a second — nothing below happens at all.
-1. Draw a profile. `THINKING` waits 40–70 s (in poll-sized slices) and starts
-   over without spending any budget.
-2. Ask `governor.claim()`. A refusal means the window's budget is spent or the
-   loop is ahead of pace: wait a second and ask again. This is the only place a
-   cycle is refused outright, and it is asked before any input is generated so a
-   refused cycle costs nothing.
-3. Read the pointer, pick a target with `next_pointer_target()` and call
+1. `get_mouse_pos()` reads the pointer, picks a target within ±300 px clamped
+   to a central rectangle (x 200–1100, y 200–650) and calls
    `move_humanlike_adaptive()`.
-4. The profile's keystroke burst: 78 % a random arrow key, 22 % a bare Shift.
-5. One of three, by a dice roll: `simulate_real_app_switch()` (30 %),
+2. 16–20 `post_dense_keystroke()` calls, 120–280 ms apart: 78 % a random
+   arrow key, 22 % a bare Shift.
+3. One of three, by a dice roll: `simulate_real_app_switch()` (30 %),
    `hardware_browser_tab_switch()` (30 %), `simulate_vertical_scrolling()` (40 %).
-6. 22 % chance of a left click where the pointer already is — **only when
-   `ENGINE_ALLOW_CLICK=1`**.
-7. The profile's end-of-cycle quiet, waited in poll-sized slices so the person
-   and `/stop` are both noticed at once.
-
-**Every single thing that reaches the operating system goes through `act()`**,
-which asks `governor.claim()` first and calls `note_engine_input()` after. That
-is what makes the ceiling hold: a burst that crosses a block boundary with no
-budget left is cut short mid-burst rather than running past the limit.
+4. 22 % chance of a left click where the pointer already is.
+5. Wait 9.5–12.5 s on the stop Event (returns early when `/stop` sets it).
 
 ### What each `simulate_*` / helper does
 

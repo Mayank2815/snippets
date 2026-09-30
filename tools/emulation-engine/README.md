@@ -5,12 +5,6 @@ app/tab switches and scrolling on the computer it runs on, with a web page to
 start and stop it. It is a Python script plus a single HTML page — no Node, no
 build step, nothing installed system-wide.
 
-It holds its own activity to a **measured band**, gets out of the way the
-moment you start using the computer, and **stops by itself after three hours**.
-Those three things are what the [Activity](#activity-what-the-engine-promises)
-section is about, and they are the reason it will sometimes sit still for
-minutes at a time on purpose.
-
 It runs on **macOS, Windows and Linux**. The loop, the timings and the console
 page are the same everywhere; only the layer that posts the input differs.
 
@@ -222,112 +216,6 @@ ENGINE_ALLOW_WAYLAND=1 ./run.sh
 The engine then runs, and the console still shows an amber warning explaining
 that input reaches XWayland windows only. It is deliberately not silent.
 
-## Activity: what the engine promises
-
-Activity trackers do not measure how hard you worked. They cut ten minutes into
-**60 blocks of ten seconds** and tick a block if *anything* happened in it — one
-keystroke ticks a block exactly as hard as a hundred. Your score is the
-percentage of blocks ticked.
-
-The engine knows that, and holds itself to three rules:
-
-| Rule | What it means |
-|---|---|
-| **Never above 65%** | No ten minutes may ever have more than **39 of the 60 blocks** ticked. Not a target — a limit the loop cannot cross, checked on every single action, and checked over *any* ten minutes rather than only the ones lined up with the engine's own clock. |
-| **A different share every window** | Each ten-minute window draws its own budget, between **21 and 34 blocks (35%–57%)**. Two windows in a row genuinely differ. |
-| **38%–47% over three hours** | The long-run average. Measured across 2,000 simulated three-hour runs: average **43.1%**, worst run 39.8%, best 45.5%, **none outside the band** and none over the ceiling. |
-
-Three more things follow from those:
-
-- **It spreads its share across the whole window.** Spending the budget in the
-  first three minutes and lying dead for seven is its own pattern, and a
-  tracker reading a rolling ten minutes would see the spike anyway. The engine
-  compares what it has used against the share due for the part of the window
-  that has actually elapsed, and goes quiet whenever it is ahead.
-- **Your own typing counts against the same budget.** If you are working, the
-  engine is not adding to your score — it is *sharing* it. Without this it
-  would pile its activity on top of yours and the combined number would sail
-  past the ceiling, which is the whole reason the rule exists.
-- **So it will sit still, sometimes for minutes.** That is the feature working.
-  The console says which of the reasons it is (see below), so a deliberate
-  quiet stretch never reads as a hang.
-
-`engine/test_metrics.py` is the simulator those numbers come from. It runs
-three hours of the real loop against the real governor on a virtual clock, in
-under a second, and `make test` fails if the calibration has drifted:
-
-```bash
-python3 engine/test_metrics.py              # one run in detail, then 200 more
-python3 engine/test_metrics.py --trials 500 # a wider sweep
-python3 engine/test_metrics.py --human      # and with a person working alongside it
-```
-
-## It pauses while you are using the computer
-
-The engine used to fight you: it would yank the pointer away and press arrow
-keys into whatever you were typing. Now it watches how long it has been since
-*anything* happened on the machine, compares that against when it last acted
-itself, and stands down completely when the input was not its own. The console
-says **"Paused — you are using this computer"**, and it starts again once you
-have been quiet for **45 seconds**.
-
-Your keystrokes still count towards the activity budget while it is paused, so
-the score stays where it should be either way.
-
-On Linux this needs the X server's XScreenSaver extension (present on every
-normal desktop) or the `xprintidle` command. On a box with neither, the engine
-says so — `/status` reports `userInputVisible: false` — and simply never
-pauses, rather than guessing.
-
-## Clicking is off by default
-
-One cycle in five used to end with a left click wherever the pointer happened
-to be. Everything else the engine does is reversible — an arrow key moves a
-caret, a scroll scrolls back — but a click is not: it can hit a link, a **Send**
-button, a tab's close box, or **Delete** in a confirmation dialog, in whatever
-window happens to be in front.
-
-So clicking is **off unless you ask for it**:
-
-```bash
-ENGINE_ALLOW_CLICK=1 ./run.sh       # macOS and Linux
-$env:ENGINE_ALLOW_CLICK = 1; .\run.ps1   # Windows
-```
-
-The console header and `GET /status` both say which it is. Only turn it on for
-a screen you have deliberately parked on something blank.
-
-## It stops on its own
-
-A run ends after **three hours**, whether or not anyone remembered it. Forgetting
-the engine used to mean it drove the machine all night; the sister tool
-`tools/keep-alive` solved the same problem the same way, and for the same
-reason — an idle limit exists to save something, and a forgotten toggle should
-not defeat it. Three hours is also the span the activity band above is measured
-over.
-
-```bash
-ENGINE_MAX_HOURS=8 ./run.sh    # a longer run
-ENGINE_MAX_HOURS=0 ./run.sh    # no limit at all, if you have decided you want that
-```
-
-The console shows the time left ("stops in 2h 41m") and `GET /status` carries it
-as `runSecondsRemaining`.
-
-## Where the pointer goes
-
-The target area is worked out from your actual screen: 10% in from each edge,
-never less than 60 pixels, which clears the macOS menu bar and Dock, the Windows
-taskbar and every desktop's hot corners. On a 1470x956 Mac that is
-x 147–1323, y 95–861 — about **64% of the screen** — and the hops between
-targets scale with it, so the pointer crosses a 4K display as readily as a
-laptop one.
-
-It used to be a fixed `x 200–1100, y 200–650`, written for a 13" 1280x800
-display. On anything bigger the pointer never left the top-left corner: 29% of a
-1470x956 screen, and less on a 4K one. A pointer that only ever lives in one
-corner is its own tell.
-
 ## Using the console
 
 Open <http://127.0.0.1:4320/> (the run script does this for you). The page is
@@ -337,13 +225,8 @@ served by the engine itself and shows:
   **OFFLINE** (engine not answering), **IDLE** (up, waiting), **RUNNING**
   (driving input right now) or **Stopping…** (you pressed Stop and the loop is
   finishing its current step — both buttons stay off until it has);
-- while it runs, *why* it is doing whatever it is doing, in words — the
-  behaviour profile of the current cycle, or "Paused — you are using this
-  computer", or "Waiting — it has used its share of this 10-minute window" — so
-  a deliberate quiet minute never reads as a hang;
-- a line reading **"This 10-minute window: 18 of 26 blocks used"**, with a bar
-  showing where that sits against the 65% ceiling, the running average against
-  the 38–47% band, and how long is left before the run stops itself;
+- while it runs, which behaviour profile the current cycle drew, in words —
+  so a deliberate quiet minute does not read as a hang (see below);
 - which backend is active, e.g. `backend: pynput on win32`;
 - **Start** and **Stop** buttons, which call `POST /start` and `POST /stop`;
 - a "Last error" line if a call fails;
@@ -364,26 +247,15 @@ is and how long the quiet afterwards lasts:
 
 | Profile | Keystrokes | Gap between keys | Quiet after the cycle | How often |
 |---|---|---|---|---|
-| **BURST** | 24–36 | 0.08–0.18 s | 3–6 s | 2 in 10 |
-| **STANDARD** | 14–20 | 0.12–0.28 s | 5–9 s | 3 in 10 |
-| **READING** | 5–10 | 0.30–0.60 s | 8–14 s | 4 in 10 |
-| **THINKING** | none | — | 40–70 s away | 1 in 10 |
+| **BURST** | 24–36 | 0.08–0.18 s | 6–9 s | 1 in 6 |
+| **STANDARD** | 14–20 | 0.12–0.28 s | 11.5–15.5 s | 2 in 6 |
+| **READING** | 5–10 | 0.30–0.60 s | 16–24 s | 2 in 6 |
+| **THINKING** | none | — | 45–75 s away | 1 in 6 |
 
-The profiles decide the *texture* of a cycle. Whether a cycle runs at all is the
-activity governor's decision, and that is why the quiet stretches inside the
-profiles are shorter than they used to be: holding the activity rate down was
-their job before the governor existed, and it is not any more. If the loop's own
-natural pace sat near the target, the governor would stop being the thing in
-control and the activity rate would go back to being an accident of the profile
-mix.
-
-**THINKING does nothing on purpose.** For up to 70 seconds nothing moves, as if
+**THINKING does nothing on purpose.** For up to 75 seconds nothing moves, as if
 you had stepped away or taken a call. The console says so in plain words while
 it happens, so it is never mistaken for a crash, and **Stop** still responds
-immediately — it does not wait the pause out. It is rarer than it used to be
-(one draw in ten, not one in six) because the governor now supplies most of the
-quiet; what THINKING still adds is one *long* unmistakably human gap, where the
-governor's own quiet is an even trickle.
+immediately — it does not wait the pause out.
 
 The profile is also in `GET /status` as `mode`, and `null` whenever the loop is
 not running.
@@ -404,7 +276,7 @@ not running.
 |----------------|--------------------------------------------------------------------------|
 | `make install` | same as `./install.sh`                                                   |
 | `make run`     | same as `./run.sh`                                                       |
-| `make test`    | runs the engine tests on the fake backend, then `engine/test_metrics.py`, which simulates 200 three-hour runs and fails if the activity calibration has drifted; neither generates any input |
+| `make test`    | runs the engine tests on the fake backend, then `engine/test_metrics.py`, an offline simulator of the action cadence; neither generates any input |
 | `make bundle`  | zips this folder (without `.venv`) as `emulation-engine-<date>.zip`     |
 
 Windows has no `make`: use `.\install.ps1` and `.\run.ps1` directly, and run
@@ -439,7 +311,6 @@ the same steps as above minus the clone.
 ```
 emulation-engine/
 ├── engine/engine.py         the engine loop + HTTP server (port 4320)
-├── engine/governor.py       the activity governor: budget, ceiling, pacing, pausing
 ├── engine/backends/         one file per platform's input layer
 │   ├── base.py              the contract every backend implements
 │   ├── quartz.py            macOS (pyobjc Quartz event taps)
@@ -448,7 +319,7 @@ emulation-engine/
 │   ├── unavailable.py       stand-in when it cannot, so the console can explain
 │   └── fake.py              records calls, generates nothing (tests)
 ├── engine/tests/            engine tests against the fake backend
-├── engine/test_metrics.py   3-hour activity simulator, on a virtual clock (make test)
+├── engine/test_metrics.py   offline cadence simulator (make test)
 ├── console/index.html       the control page the engine serves at /
 ├── install.sh  run.sh       macOS and Linux
 ├── packages.sh              which package manager this Linux box uses, and the
@@ -516,7 +387,3 @@ Privacy & Security → Automation.
 - It never types letters or digits — only arrow keys, Shift, the app-switcher
   chord, the next-tab chord and scroll — but it will act on whatever window is
   in front. Do not leave it running over an open chat box or a form.
-- **It does not click unless you set `ENGINE_ALLOW_CLICK=1`.** A click is the
-  one thing it does that cannot be undone. See "Clicking is off by default".
-- It stops by itself after three hours (`ENGINE_MAX_HOURS` changes that), so a
-  run you walk away from does not carry on all night.

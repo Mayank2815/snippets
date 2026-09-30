@@ -27,18 +27,6 @@ class FakeBackend(InputBackend):
         # racing a loop that finishes its cycle in milliseconds.
         self.gate = None
         self._position = self.POSITION
-        # What seconds_since_user_input() answers. None means "this platform
-        # cannot say", the Linux-without-XScreenSaver case; a number is a
-        # settable idle time so tests can drive the pause-on-use behaviour.
-        # WHY None by default: it is the state in which the governor never
-        # pauses and never counts human blocks, so a test that does not care
-        # about the person gets a loop that behaves exactly as it did before
-        # the governor existed.
-        self.user_idle_seconds = None
-        # How many times the idle timer was polled. Counted rather than
-        # recorded in `calls` (see below) for tests that want to prove the
-        # poll happens at all.
-        self.idle_polls = 0
 
     def _record(self, method, *args):
         if self.gate is not None:
@@ -48,18 +36,6 @@ class FakeBackend(InputBackend):
     def mouse_position(self):
         self._record("mouse_position")
         return self._position
-
-    def seconds_since_user_input(self):
-        """Deliberately NOT recorded in `calls`.
-
-        The governor polls this about once a second — while paused, while
-        holding, and all the way through a THINKING pause — so recording it
-        would bury the input calls every test asserts on, and would make
-        "THINKING generates no calls at all" impossible to state. It generates
-        no input, so it does not belong in a log of generated input.
-        """
-        self.idle_polls += 1
-        return self.user_idle_seconds
 
     def screen_size(self):
         self._record("screen_size")

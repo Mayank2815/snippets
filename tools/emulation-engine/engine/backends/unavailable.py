@@ -41,12 +41,6 @@ class UnavailableBackend(InputBackend):
     def mouse_position(self):
         self._refuse("mouse_position")
 
-    def seconds_since_user_input(self):
-        """None, not a refusal: the loop never runs on this backend, but the
-        governor's snapshot is still built for /status, and answering "this
-        platform cannot say" is both true and harmless."""
-        return None
-
     def screen_size(self):
         return self.SCREEN
 

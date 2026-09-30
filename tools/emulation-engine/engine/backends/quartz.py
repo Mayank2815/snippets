@@ -12,11 +12,7 @@ import random
 import subprocess
 import sys
 
-from .base import (
-    InputBackend, pause, KEY_HOLD_SECONDS, CLICK_HOLD_SECONDS, CHORD_HOLD_SECONDS,
-    SWITCH_SHOW_SECONDS, SWITCH_TAB_HOLD_SECONDS, SWITCH_TAB_GAP_SECONDS,
-    SWITCH_ACTIVATE_SECONDS,
-)
+from .base import InputBackend, pause
 
 
 def _import_quartz():
@@ -24,17 +20,13 @@ def _import_quartz():
         CGEventCreateMouseEvent, CGEventPost, kCGHIDEventTap,
         kCGEventMouseMoved, kCGEventLeftMouseDown, kCGEventLeftMouseUp,
         CGEventCreate, CGEventGetLocation, CGEventCreateKeyboardEvent,
-        CGEventCreateScrollWheelEvent, kCGScrollEventUnitLine,
-        CGEventSourceSecondsSinceLastEventType,
-        kCGEventSourceStateCombinedSessionState, kCGAnyInputEventType
+        CGEventCreateScrollWheelEvent, kCGScrollEventUnitLine
     )
     return (
         CGEventCreateMouseEvent, CGEventPost, kCGHIDEventTap,
         kCGEventMouseMoved, kCGEventLeftMouseDown, kCGEventLeftMouseUp,
         CGEventCreate, CGEventGetLocation, CGEventCreateKeyboardEvent,
-        CGEventCreateScrollWheelEvent, kCGScrollEventUnitLine,
-        CGEventSourceSecondsSinceLastEventType,
-        kCGEventSourceStateCombinedSessionState, kCGAnyInputEventType
+        CGEventCreateScrollWheelEvent, kCGScrollEventUnitLine
     )
 
 
@@ -65,9 +57,7 @@ except ImportError as err:
     CGEventCreateMouseEvent, CGEventPost, kCGHIDEventTap,
     kCGEventMouseMoved, kCGEventLeftMouseDown, kCGEventLeftMouseUp,
     CGEventCreate, CGEventGetLocation, CGEventCreateKeyboardEvent,
-    CGEventCreateScrollWheelEvent, kCGScrollEventUnitLine,
-    CGEventSourceSecondsSinceLastEventType,
-    kCGEventSourceStateCombinedSessionState, kCGAnyInputEventType
+    CGEventCreateScrollWheelEvent, kCGScrollEventUnitLine
 ) = _quartz
 
 # --- FIXED ABSOLUTE TELEMETRY INJECTION KEYBOARD MATRIX ---
@@ -119,26 +109,6 @@ class QuartzBackend(InputBackend):
         pointer = CGEventGetLocation(event)
         return pointer.x, pointer.y
 
-    def seconds_since_user_input(self):
-        """Seconds since any HID event reached this login session.
-
-        WHY kCGEventSourceStateCombinedSessionState: it is the state that sees
-        both real hardware and posted events across the whole session, which is
-        what "has anything happened on this computer" means. The per-process
-        state would only see our own events, and the hardware state would miss
-        them entirely — and the governor needs both, because separating the
-        person from the engine is done by comparing timestamps, not sources.
-        kCGAnyInputEventType (0xFFFFFFFF) covers key, mouse and scroll alike.
-        """
-        try:
-            return float(CGEventSourceSecondsSinceLastEventType(
-                kCGEventSourceStateCombinedSessionState, kCGAnyInputEventType))
-        except Exception:
-            # Never guess a number here: a guess makes the engine pause or
-            # refuse to pause at random. None means "cannot say", which the
-            # governor and the console both handle explicitly.
-            return None
-
     def screen_size(self):
         try:
             from Quartz.CoreGraphics import CGMainDisplayID, CGDisplayBounds
@@ -154,7 +124,9 @@ class QuartzBackend(InputBackend):
 
     def click(self, x, y):
         post_mouse_event(x, y, kCGEventLeftMouseDown)
-        pause(CLICK_HOLD_SECONDS)
+        # WHY 0.02 s: a light click — the button is held just long enough to
+        # register as a press rather than a bounce.
+        pause(0.02)
         post_mouse_event(x, y, kCGEventLeftMouseUp)
 
     def scroll(self, lines, direction):
@@ -165,7 +137,9 @@ class QuartzBackend(InputBackend):
         key_code = KEY_CODES[name]
         down = CGEventCreateKeyboardEvent(None, key_code, True)
         CGEventPost(kCGHIDEventTap, down)
-        pause(random.uniform(*KEY_HOLD_SECONDS))
+        # WHY 0.012-0.025 s: a real key press is held roughly 10-25 ms. Shorter looks
+        # synthetic; much longer risks the OS starting key repeat.
+        pause(random.uniform(0.012, 0.025))
         up = CGEventCreateKeyboardEvent(None, key_code, False)
         CGEventPost(kCGHIDEventTap, up)
 
@@ -173,20 +147,26 @@ class QuartzBackend(InputBackend):
         """Sequential multi-strike layout with sustained hold times to ensure deep background windows swap context"""
         cmd_down = CGEventCreateKeyboardEvent(None, COMMAND_KEY, True)
         CGEventPost(kCGHIDEventTap, cmd_down)
-        pause(SWITCH_SHOW_SECONDS)
+        # WHY 0.08 s: gives the app switcher time to appear before the first Tab.
+        pause(0.08)
 
         for _ in range(count):
             tab_down = CGEventCreateKeyboardEvent(None, TAB_KEY, True)
             CGEventSetFlags(tab_down, FLAG_COMMAND)
             CGEventPost(kCGHIDEventTap, tab_down)
-            pause(SWITCH_TAB_HOLD_SECONDS)
+            # WHY 0.05 s: hold Tab long enough to register as a distinct press.
+            pause(0.05)
 
             tab_up = CGEventCreateKeyboardEvent(None, TAB_KEY, False)
             CGEventSetFlags(tab_up, FLAG_COMMAND)
             CGEventPost(kCGHIDEventTap, tab_up)
-            pause(SWITCH_TAB_GAP_SECONDS)
+            # WHY 0.18 s: the switcher needs a beat between Tabs to advance one app
+            # per press instead of collapsing them into one.
+            pause(0.18)
 
-        pause(SWITCH_ACTIVATE_SECONDS)
+        # WHY 0.30 s: let the switcher settle on the highlighted app so releasing
+        # Command actually activates it.
+        pause(0.30)
         cmd_up = CGEventCreateKeyboardEvent(None, COMMAND_KEY, False)
         CGEventPost(kCGHIDEventTap, cmd_up)
 
@@ -195,7 +175,9 @@ class QuartzBackend(InputBackend):
         down = CGEventCreateKeyboardEvent(None, RIGHT_ARROW, True)
         CGEventSetFlags(down, combined_flags)
         CGEventPost(kCGHIDEventTap, down)
-        pause(random.uniform(*CHORD_HOLD_SECONDS))
+        # WHY 0.05-0.10 s: a chord is held a little longer than a plain key so the
+        # browser sees the modifiers and the arrow together.
+        pause(random.uniform(0.05, 0.10))
         up = CGEventCreateKeyboardEvent(None, RIGHT_ARROW, False)
         CGEventSetFlags(up, combined_flags)
         CGEventPost(kCGHIDEventTap, up)

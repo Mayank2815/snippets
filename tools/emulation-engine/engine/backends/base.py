@@ -34,50 +34,6 @@ def pause(seconds):
     time.sleep(seconds * SLEEP_SCALE)
 
 
-def engine_time():
-    """A monotonic clock on the same scale as pause().
-
-    WHY: the activity governor measures ten-second blocks of wall time, but
-    ENGINE_FAST=1 shrinks every sleep in the loop by 100. Left on the real
-    clock, a whole fast-mode test run would sit inside a single block and the
-    governor would behave nothing like it does in production. Dividing by the
-    same factor keeps the governor's blocks in exactly the same proportion to
-    the loop's cadence at either speed, so the tests exercise the real
-    behaviour rather than a degenerate corner of it.
-    """
-    return time.monotonic() / SLEEP_SCALE
-
-
-# --- shared hold times ------------------------------------------------------
-# WHY these live here and not in each backend: both quartz.py and
-# pynput_backend.py used to carry their own copy of every one of these numbers
-# with the same WHY comment beside it, which is two places to change and one
-# place to forget. They are also the only honest source for the cycle-duration
-# model engine/test_metrics.py simulates against — a simulator that re-declared
-# them would drift out of date exactly like the old one did.
-#
-# WHY 0.012-0.025 s: a real key press is held roughly 10-25 ms. Shorter looks
-# synthetic; much longer risks the OS starting key repeat.
-KEY_HOLD_SECONDS = (0.012, 0.025)
-# WHY 0.02 s: a light click — the button is held just long enough to register
-# as a press rather than a bounce.
-CLICK_HOLD_SECONDS = 0.02
-# WHY 0.05-0.10 s: a chord is held a little longer than a plain key so the
-# browser sees the modifiers and the key together.
-CHORD_HOLD_SECONDS = (0.05, 0.10)
-# The app-switcher sequence. These are not decoration: shorter values make the
-# switcher collapse the presses into one, or never appear at all.
-# WHY 0.08 s: gives the app switcher time to appear before the first Tab.
-SWITCH_SHOW_SECONDS = 0.08
-# WHY 0.05 s: hold Tab long enough to register as a distinct press.
-SWITCH_TAB_HOLD_SECONDS = 0.05
-# WHY 0.18 s: the switcher needs a beat between Tabs to advance one app per
-# press instead of collapsing them into one.
-SWITCH_TAB_GAP_SECONDS = 0.18
-# WHY 0.30 s: let the switcher settle on the highlighted app so releasing the
-# modifier actually activates it.
-SWITCH_ACTIVATE_SECONDS = 0.30
-
 # The semantic key names the loop uses; each backend maps them to its own
 # key codes. Arrow keys and Shift never type a character or trigger a
 # shortcut on their own, which is what makes them safe to inject.
@@ -111,22 +67,6 @@ class InputBackend:
     def mouse_position(self):
         """Return the pointer position as an (x, y) tuple in screen pixels
         (points on macOS)."""
-        raise NotImplementedError
-
-    def seconds_since_user_input(self):
-        """Seconds since ANY input last reached this computer, or None when
-        the platform cannot say.
-
-        This counts the engine's own synthetic input too — every platform's
-        idle timer is reset by it — so a caller cannot read this as "seconds
-        since the *person* did something". `governor.ActivityGovernor` does
-        that separation by comparing the answer against when the engine itself
-        last acted; see observe_user_input() there.
-
-        Returning None must always stay an option: a Linux box without the
-        XScreenSaver extension and without xprintidle genuinely cannot answer,
-        and guessing a number there would make the engine pause at random.
-        """
         raise NotImplementedError
 
     def screen_size(self):

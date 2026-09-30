@@ -5,27 +5,10 @@ A tiny HTTP server on 127.0.0.1:4320 exposes the engine:
     GET  /         the control console (console/index.html, next to this folder)
     GET  /status   {"status": "IDLE" | "RUNNING" | "STOPPING", "backend": ...,
                     "platform": ..., "inputWorking": true|false, "warning": null|"...",
-                    "mode": null | "BURST" | "STANDARD" | "READING" | "THINKING",
-                    "pausedForUser": true|false, "governor": {...}|null,
-                    "runSecondsRemaining": null|number, "maxRunHours": number,
-                    "clickEnabled": true|false}
+                    "mode": null | "BURST" | "STANDARD" | "READING" | "THINKING"}
     POST /start    start the emulation loop in a background thread
                    (503 when inputWorking is false — see below)
     POST /stop     ask the loop to stop after its current step
-
-How much input it generates is not left to chance. An activity tracker scores a
-ten-minute window as 60 blocks of ten seconds and counts a block as active if
-any input landed in it; `governor.ActivityGovernor` gives each window a random
-budget of those blocks, never lets one exceed a hard ceiling, paces the spending
-across the window, and counts the *person's* own keystrokes against the same
-budget. See engine/governor.py, and engine/test_metrics.py for the three-hour
-simulation the numbers were tuned against.
-
-The engine also gets out of the way. When it sees input it cannot have
-generated itself it stops entirely and says "paused — you are using this
-computer", resuming once the person has been quiet again. And it stops for good
-after ENGINE_MAX_HOURS (3 by default), so a forgotten run does not carry on all
-night.
 
 `inputWorking` is false when the backend exists but cannot actually deliver a
 single event — on Linux that means a Wayland session, or no X display. In that
@@ -63,13 +46,7 @@ import math
 sys.stdout.reconfigure(line_buffering=True)
 
 from backends import get_backend
-from backends.base import (
-    pause, engine_time, SLEEP_SCALE, KEY_HOLD_SECONDS, CLICK_HOLD_SECONDS,
-    CHORD_HOLD_SECONDS, SWITCH_SHOW_SECONDS, SWITCH_TAB_HOLD_SECONDS,
-    SWITCH_TAB_GAP_SECONDS, SWITCH_ACTIVATE_SECONDS,
-)
-import governor as governor_module
-from governor import ActivityGovernor
+from backends.base import pause, SLEEP_SCALE
 
 try:
     backend = get_backend()
@@ -90,9 +67,9 @@ PORT = int(os.environ.get("PORT", DEFAULT_PORT))
 CONSOLE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'console', 'index.html')
 
 # WHY a per-worker Event instead of a shared boolean: /stop used to clear one
-# global flag while the worker might be inside its end-of-cycle sleep; a /start
-# in that window set the flag back to True and started a second thread, and the
-# old one woke up, saw True and carried on — two loops at once.
+# global flag while the worker might be inside its 9.5-12.5 s end-of-cycle
+# sleep; a /start in that window set the flag back to True and started a second
+# thread, and the old one woke up, saw True and carried on — two loops at once.
 # Each worker now owns the Event it was started with, so setting it stops that
 # worker and nothing can ever revive it. Event.is_set() is atomic, so the worker
 # reads it without the lock; thread_lock only guards the start/stop transitions.
@@ -136,244 +113,47 @@ SHIFT_MODIFIER = "shift"
 # Global application sequence loop counter
 app_cycle_index = 1
 
-# --- HOW LONG A RUN LASTS ---------------------------------------------------
-# WHY a limit at all: the engine has no idea whether anyone is still there, and
-# the failure mode of forgetting it is that it drives the machine all night.
-# Keep Alive (tools/keep-alive) solved the identical problem the identical way
-# — it keeps an instance awake for a fixed number of hours from each press of
-# Start, precisely so a forgotten toggle cannot defeat the thing the limit
-# exists for.
-# WHY 3 hours: it is the span the activity band was specified and simulated
-# over, so it is also the span the engine's promises about its own numbers are
-# actually measured across. ENGINE_MAX_HOURS overrides it; 0 means no limit,
-# for someone who has decided they want that.
-DEFAULT_MAX_RUN_HOURS = 3.0
-
-
-def _max_run_hours():
-    raw = os.environ.get("ENGINE_MAX_HOURS", "").strip()
-    if not raw:
-        return DEFAULT_MAX_RUN_HOURS
-    try:
-        hours = float(raw)
-    except ValueError:
-        print(f"[Warning] ENGINE_MAX_HOURS={raw!r} is not a number; using {DEFAULT_MAX_RUN_HOURS}.")
-        return DEFAULT_MAX_RUN_HOURS
-    return max(0.0, hours)
-
-
-MAX_RUN_HOURS = _max_run_hours()
-
-# --- CLICKING ---------------------------------------------------------------
-# WHY off by default: the click lands wherever the pointer happens to be, in
-# whatever window is in front. That is a link, a Send button, a tab's close
-# box, a Delete in a confirmation dialog. Every other thing the engine does is
-# reversible — an arrow key moves a caret, a scroll scrolls back — and a click
-# is the one that is not. It stays in the code, and stays tested, because on a
-# screen someone has deliberately parked on a blank document it is the most
-# human thing in the loop; it just is not something to switch on by accident.
-ALLOW_CLICK = os.environ.get("ENGINE_ALLOW_CLICK", "").strip() == "1"
-
 # --- BEHAVIOUR PROFILES -----------------------------------------------------
 # WHY profiles at all: one fixed cadence makes every cycle look the same, and a
 # constant rhythm is the easiest thing in the world to spot. A real person types
-# in bursts, reads slowly, and disappears into a call. The loop picks one of
+# in bursts, reads slowly, and disappears into a call. The loop now picks one of
 # these per cycle, so the gaps between actions vary the way a person's do.
-#
-# The profiles decide the *texture* of a cycle. Whether a cycle runs at all is
-# the governor's decision — see engine/governor.py.
 #
 # strokes     — how many keystrokes in the burst
 # key_gap     — seconds between keystrokes
 # cycle_sleep — seconds of quiet at the end of the cycle
 MODE_PROFILES = {
     # Head down and typing: lots of keys, close together, short pause after.
-    "BURST":    {"strokes": (24, 36), "key_gap": (0.08, 0.18), "cycle_sleep": (3.0, 6.0)},
+    "BURST":    {"strokes": (24, 36), "key_gap": (0.08, 0.18), "cycle_sleep": (6.0, 9.0)},
     # The middle of the road, and what the loop used to do all the time.
-    "STANDARD": {"strokes": (14, 20), "key_gap": (0.12, 0.28), "cycle_sleep": (5.0, 9.0)},
+    "STANDARD": {"strokes": (14, 20), "key_gap": (0.12, 0.28), "cycle_sleep": (11.5, 15.5)},
     # Reading the screen: the odd arrow key, long gaps, a long pause after.
-    "READING":  {"strokes": (5, 10),  "key_gap": (0.30, 0.60), "cycle_sleep": (8.0, 14.0)},
+    "READING":  {"strokes": (5, 10),  "key_gap": (0.30, 0.60), "cycle_sleep": (16.0, 24.0)},
     # Away from the keyboard entirely — see THINKING_PAUSE below.
     "THINKING": {"strokes": (0, 0),   "key_gap": (0.0, 0.0),   "cycle_sleep": (0.0, 0.0)},
 }
 
-# WHY these weights (one entry per draw): STANDARD three times, READING four,
-# BURST twice, THINKING once in ten.
-#
-# WHY the quiet stretches inside the profiles got SHORTER when the governor
-# arrived, and why THINKING got rarer. Before the governor, the cycle_sleep
-# ranges were the only thing holding the activity rate down, so they had to be
-# long (11.5-15.5 s for STANDARD, 16-24 s for READING) and THINKING had to come
-# up one draw in six. That is no longer their job. The governor decides how
-# many of a window's 60 blocks get used and refuses claims until the pace is
-# right, so the profiles are free to describe what a person at a keyboard
-# actually does — and they *have* to, because if the loop's own natural rate
-# falls near the target the governor stops being the thing in control and the
-# activity rate goes back to being an accident of the profile mix. Measured:
-# with the old sleeps the loop's unconstrained rate was 51 % against a target
-# averaging 46 %, so the governor barely bound and the three-hour average came
-# out at 40.2 % with runs as low as 35.1 %. With these it is 70 % against the
-# same target, the governor binds everywhere, and the average is 42.9 % with no
-# run outside the band in 600.
-#
-# THINKING survives at one in ten because it still does something the governor
-# does not: the governor's own quiet is an even trickle (that is exactly what
-# pacing produces), whereas THINKING makes one long unmistakably human gap. At
-# one in six it cost about two and a half points of the average for nothing,
-# because it threw away pro-rata opportunity the governor had already granted.
-MODE_POOL = ["BURST", "BURST", "STANDARD", "STANDARD", "STANDARD",
-             "READING", "READING", "READING", "READING", "THINKING"]
+# WHY these weights (one entry per draw): STANDARD and READING twice each,
+# BURST and THINKING once, so a cycle is about 33% standard, 33% reading,
+# 17% burst and 17% away. A person is rarely bursting and rarely gone.
+MODE_POOL = ["BURST", "STANDARD", "STANDARD", "READING", "READING", "THINKING"]
 
-# WHY 40-70 s: long enough to read as a call or a corridor conversation rather
-# than a pause between keystrokes. Roughly one cycle in ten, so on average
-# about a minute away in every ten cycles.
-THINKING_PAUSE = (40.0, 70.0)
+# WHY 45-75 s: long enough to read as a call or a corridor conversation rather
+# than a pause between keystrokes, and it is what drops the overall activity
+# rate below a flat line. Roughly one cycle in six, so on average about a minute
+# away in every six cycles.
+THINKING_PAUSE = (45.0, 75.0)
 
-# --- WHERE THE POINTER GOES -------------------------------------------------
-# WHY a fraction of the real screen and not a fixed rectangle: the loop used to
-# clamp to x 200-1100, y 200-650 — numbers written for a 13" 1280x800 display.
-# On the 1470x956 Mac this is developed on that is 29 % of the screen, all of it
-# in the top left, so the pointer never once visited the right-hand third or the
-# bottom quarter. A pointer that only ever lives in one corner is a tell.
-# WHY 10 % inset with a 60 px floor: it has to clear the macOS menu bar and the
-# Dock, the Windows taskbar, and every desktop's hot corners, at any size. On a
-# 1470x956 screen that is a 147 px side inset and a 95 px top and bottom one —
-# comfortably past a menu bar (~38 px), a Dock (~80 px) and a taskbar (~48 px)
-# — and it still leaves 64 % of the screen reachable. The floor stops a small
-# or scaled display from insetting itself down to nothing.
-TARGET_INSET_FRACTION = 0.10
-TARGET_MIN_INSET_PX = 60
-# WHY 35 % of the rectangle: the old fixed ±300 px hop was a third of a 900 px
-# wide rectangle and is a fifth of a 4K one, so on a big screen the pointer
-# would crawl and take minutes to cross. Scaling the hop keeps the *character*
-# of the movement — a few hops to cross the working area — identical at any
-# size.
-MOVE_HOP_FRACTION = 0.35
-
-# --- MOVEMENT, SCROLL AND DICE ----------------------------------------------
-# Named so engine/test_metrics.py can model a cycle's duration from the real
-# numbers instead of a copy of them.
-# WHY 18..40 steps at one per 16 px: short hops still get enough samples to
-# show a curve, long moves are capped so they do not flood the event tap.
-MOVE_STEPS = (18, 40)
-MOVE_PIXELS_PER_STEP = 16
-# WHY 5-10 ms between samples: 100-200 Hz, the report rate of a USB mouse.
-MOVE_SAMPLE_GAP = (0.005, 0.010)
-# WHY 8-15 % of the distance: enough wander in the control points to bend the
-# path visibly without swinging off screen.
-MOVE_DEVIATION_FRACTION = (0.08, 0.15)
-# WHY 4-8 lines: a short flick of a scroll wheel, not a page jump.
-SCROLL_LINES = (4, 8)
-# WHY 0.15-0.30 s: the cadence of wheel notches; a tighter stream would look
-# like a trackpad gesture rather than a wheel.
-SCROLL_GAP = (0.15, 0.30)
-# WHY 0.22: roughly one stroke in five is a bare Shift, so the burst is not a
-# pure run of arrow keys.
-SHIFT_PROBABILITY = 0.22
-# WHY 0.22: about one cycle in five ends with a click where the pointer already
-# is (only when ENGINE_ALLOW_CLICK=1 — see ALLOW_CLICK above).
-CLICK_PROBABILITY = 0.22
-# WHY 30 / 30 / 40 %: app switch, browser tab switch and scrolling are mixed so
-# no single kind of event dominates.
-APP_SWITCH_PROBABILITY = 0.30
-TAB_SWITCH_PROBABILITY = 0.30
-# WHY 0.04 s: a settle before the click, so it does not arrive in the same
-# instant the pointer stopped.
-CLICK_SETTLE_SECONDS = 0.04
-# The neutral fallback every backend uses when the window manager will not say
-# how many apps are open. Named here because the cycle-duration model needs it.
-DEFAULT_APP_COUNT = 5
-
-# WHY 1 s: how often the loop looks up while it is waiting — at the idle timer
-# (so a person who starts typing is noticed within a second) and at the
-# governor (so a budget that has just come free is used promptly). A tenth of
-# the governor's ten-second block, and cheap enough to do all day: on every
-# platform the idle read is one library call.
-GOVERNOR_POLL_SECONDS = 1.0
-
-# The profile the loop is in right now, or None when it is not running or when
-# the governor is holding it quiet. Read by GET /status. WHY it is reported at
-# all: THINKING does nothing for up to 75 seconds, and a console that just says
-# RUNNING while the pointer sits still is indistinguishable from a hang — the
-# exact "looks broken, says fine" problem the Wayland guard exists to prevent.
-# A plain string assignment is atomic in CPython, so these need no lock.
+# The profile the loop is in right now, or None when it is not running. Read by
+# GET /status. WHY it is reported at all: THINKING does nothing for up to 75
+# seconds, and a console that just says RUNNING while the pointer sits still is
+# indistinguishable from a hang — the exact "looks broken, says fine" problem
+# the Wayland guard exists to prevent. A plain string assignment is atomic in
+# CPython, so this needs no lock.
 current_mode = None
-# True while the loop is standing down because the person is using the machine.
-paused_for_user = False
-# True while the governor is refusing claims — budget spent, or ahead of pace.
-governor_holding = False
-# The running worker's governor, or None when idle. /status reads its snapshot.
-current_governor = None
-# engine_time() at which the current run stops itself, or None when idle.
-run_deadline = None
 
 
-def target_rectangle(width, height):
-    """The (left, top, right, bottom) the pointer is allowed to visit, derived
-    from the real screen size rather than assumed. See TARGET_INSET_FRACTION."""
-    inset_x = max(TARGET_MIN_INSET_PX, int(width * TARGET_INSET_FRACTION))
-    inset_y = max(TARGET_MIN_INSET_PX, int(height * TARGET_INSET_FRACTION))
-    left, right = inset_x, width - inset_x
-    top, bottom = inset_y, height - inset_y
-    if right <= left or bottom <= top:
-        # A display smaller than twice the floor inset — a tiny virtual screen
-        # in a container, or a platform that reported something absurd. Use the
-        # whole thing rather than an inverted rectangle the clamp would then
-        # collapse to a single point.
-        return 0, 0, max(1, width - 1), max(1, height - 1)
-    return left, top, right, bottom
-
-
-def pointer_hop(rect):
-    """How far a single hop may move the pointer, in x and y — a fraction of
-    the reachable rectangle rather than a fixed pixel count. See
-    MOVE_HOP_FRACTION."""
-    left, top, right, bottom = rect
-    return (max(1, int((right - left) * MOVE_HOP_FRACTION)),
-            max(1, int((bottom - top) * MOVE_HOP_FRACTION)))
-
-
-def next_pointer_target(x, y, rect, hop):
-    """Where the pointer goes next: a random hop from where it is, clamped
-    into the reachable rectangle. Separate from the loop so a test can iterate
-    it a few hundred times and check the whole rectangle really gets visited —
-    which is the thing that was silently untrue when the rectangle was a fixed
-    1280x800 one."""
-    left, top, right, bottom = rect
-    hop_x, hop_y = hop
-    return (max(left, min(x + random.randint(-hop_x, hop_x), right)),
-            max(top, min(y + random.randint(-hop_y, hop_y), bottom)))
-
-
-def act(gov, call, *args):
-    """Generate one piece of input, if the governor allows it right now.
-
-    Every single thing that reaches the operating system goes through here, so
-    the block budget cannot be spent behind the governor's back. `claim()`
-    decides and records in one step; `note_engine_input()` afterwards stamps
-    the moment the call *returned*, which is what keeps the engine from
-    mistaking its own two-second app switch for the user arriving.
-
-    Returns False when the claim was refused, which the callers use to cut a
-    burst short at a block boundary rather than run past the ceiling.
-
-    The one gap, stated plainly: a *single* backend call that straddles a block
-    boundary — an app switch is the only one long enough, at up to ~1.3 s — puts
-    input into a block that was never claimed, so the accounting can be one
-    block light. It costs at most one block, and only matters at all if a window
-    were already sitting on the ceiling, which no measured run comes near (the
-    worst window over 2,000 simulated three-hour runs is 34 of 39). Claiming
-    per-event inside the backends would close it and would mean the backend
-    layer knowing about the governor, which is a worse trade.
-    """
-    if not gov.claim():
-        return False
-    call(*args)
-    gov.note_engine_input()
-    return True
-
-
-def simulate_real_app_switch(gov):
+def simulate_real_app_switch():
     """Sequential multi-strike layout with sustained hold times to ensure deep background windows swap context"""
     global app_cycle_index
 
@@ -384,33 +164,39 @@ def simulate_real_app_switch(gov):
 
     print(f"  [System Shift] Navigating next app in loop sequence. Open Apps Counter: {total_apps}. Striking Tab {app_cycle_index} time(s).")
 
-    act(gov, backend.app_switch, app_cycle_index)
+    backend.app_switch(app_cycle_index)
 
     app_cycle_index += 1
 
-def hardware_browser_tab_switch(gov):
+def hardware_browser_tab_switch():
     print("  [Browser Shift] Cycling active browser tab index natively...")
-    act(gov, backend.browser_tab_next)
+    backend.browser_tab_next()
 
-def simulate_vertical_scrolling(gov, stop):
+def simulate_vertical_scrolling(stop):
     direction = random.choice([-1, 1])
-    scroll_lines = random.randint(*SCROLL_LINES)
+    # WHY 4-8 lines: a short flick of a scroll wheel, not a page jump.
+    scroll_lines = random.randint(4, 8)
     print(f"  [Scroll Active] Generating smooth vertical scrolling. Lines: {scroll_lines}")
     for _ in range(scroll_lines):
         if stop.is_set(): break
-        if not act(gov, backend.scroll, 1, direction): break
-        pause(random.uniform(*SCROLL_GAP))
+        backend.scroll(1, direction)
+        # WHY 0.15-0.30 s: the cadence of wheel notches; a tighter stream would
+        # look like a trackpad gesture rather than a wheel.
+        pause(random.uniform(0.15, 0.30))
 
 def bezier_point(p0_x, p0_y, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y, t):
     x = (1-t)**3 * p0_x + 3*(1-t)**2 * t * p1_x + 3*(1-t) * t**2 * p2_x + t**3 * p3_x
     y = (1-t)**3 * p0_y + 3*(1-t)**2 * t * p1_y + 3*(1-t) * t**2 * p2_y + t**3 * p3_y
     return x, y
 
-def move_humanlike_adaptive(gov, start_x, start_y, end_x, end_y, stop):
+def move_humanlike_adaptive(start_x, start_y, end_x, end_y, stop):
     distance = math.hypot(end_x - start_x, end_y - start_y)
-    low_steps, high_steps = MOVE_STEPS
-    steps = int(max(low_steps, min(high_steps, distance / MOVE_PIXELS_PER_STEP)))
-    deviation = distance * random.uniform(*MOVE_DEVIATION_FRACTION)
+    # WHY 18..40 steps at one per 16 px: short hops still get enough samples to
+    # show a curve, long moves are capped so they do not flood the event tap.
+    steps = int(max(18, min(40, distance / 16)))
+    # WHY 8-15 % of the distance: enough wander in the control points to bend
+    # the path visibly without swinging off screen.
+    deviation = distance * random.uniform(0.08, 0.15)
 
     # WHY 0.25 / 0.75: standard placement of the two inner control points of a
     # cubic Bezier, one per quarter of the path, before the random offset.
@@ -426,195 +212,88 @@ def move_humanlike_adaptive(gov, start_x, start_y, end_x, end_y, stop):
         # and stops with zero velocity like a hand does.
         t_eased = 10 * t**3 - 15 * t**4 + 6 * t**5
         target_x, target_y = bezier_point(start_x, start_y, p1_x, p1_y, p2_x, p2_y, end_x, end_y, t_eased)
-        if not act(gov, backend.move_mouse, target_x, target_y): break
-        pause(random.uniform(*MOVE_SAMPLE_GAP))
+        backend.move_mouse(target_x, target_y)
+        # WHY 5-10 ms between samples: 100-200 Hz, the report rate of a USB mouse.
+        pause(random.uniform(0.005, 0.010))
 
-
-def quiet_wait(stop, gov, seconds):
-    """Wait, in poll-sized slices, watching for the person and for /stop.
-
-    Returns True if it waited the whole time, False if it came back early
-    because the loop must react now — /stop, or the person starting to type.
-
-    WHY not one long stop.wait(): the end-of-cycle quiet is up to 24 s and a
-    THINKING pause up to 75 s, and a person who sits down in the middle of one
-    must not have to wait it out before the engine notices them.
-    """
-    remaining = seconds
-    while remaining > 0:
-        slice_seconds = min(GOVERNOR_POLL_SECONDS, remaining)
-        if stop.wait(slice_seconds * SLEEP_SCALE):
-            return False
-        remaining -= slice_seconds
-        gov.observe_user_input()
-        if gov.user_is_active():
-            return False
-    return True
-
-
-def loop_worker(stop, gov=None, deadline=None):
+def loop_worker(stop):
     """The emulation loop. `stop` is this worker's own Event; /stop sets it."""
     print("\n=====================================================")
     print("[Core Engine] Active Target-Stabilized Emulation Initiated.")
     print("=====================================================")
 
-    global current_mode, paused_for_user, governor_holding, current_governor, run_deadline
+    global current_mode
 
-    if gov is None:
-        gov = ActivityGovernor(engine_time, read_idle=backend.seconds_since_user_input)
-    gov.begin()
-    current_governor = gov
+    while not stop.is_set():
+        # A fresh profile every cycle. Picking per cycle rather than sticking
+        # with one for a while is deliberate: the point is that no two
+        # consecutive cycles have to look alike.
+        current_mode = random.choice(MODE_POOL)
 
-    width, height = backend.screen_size()
-    rect = target_rectangle(width, height)
-    left, top, right, bottom = rect
-    hop_x, hop_y = pointer_hop(rect)
-    print(f"  [Pointer Field] {width}x{height} screen; targets stay inside "
-          f"x {left}-{right}, y {top}-{bottom} (hops up to {hop_x}x{hop_y} px).")
+        if current_mode == "THINKING":
+            macro_pause = random.uniform(*THINKING_PAUSE)
+            print(f"  [Behaviour: THINKING] Away from the keyboard for {int(macro_pause)}s.")
+            # WHY stop.wait and not a sleep loop: /stop ends the pause at once
+            # instead of leaving the user waiting out the rest of 75 seconds.
+            stop.wait(macro_pause * SLEEP_SCALE)
+            continue
 
-    if deadline is None:
-        deadline = (engine_time() + MAX_RUN_HOURS * 3600.0) if MAX_RUN_HOURS > 0 else None
-    run_deadline = deadline
-    if deadline is not None:
-        print(f"  [Run Limit] stopping automatically after {MAX_RUN_HOURS:g} hour(s).")
+        profile = MODE_PROFILES[current_mode]
+        print(f"  [Behaviour: {current_mode}] Processing execution matrix wave.")
 
-    try:
-        while not stop.is_set():
-            if deadline is not None and engine_time() >= deadline:
-                print(f"[Core Engine] Reached the {MAX_RUN_HOURS:g} hour run limit — stopping.")
-                break
+        curr_x, curr_y = backend.mouse_position()
+        # WHY ±300 px clamped to x 200..1100, y 200..650: a random hop that stays
+        # in the middle of a 13" display (1280x800 points), away from the menu
+        # bar, the Dock and the hot corners.
+        target_x = max(200, min(curr_x + random.randint(-300, 300), 1100))
+        target_y = max(200, min(curr_y + random.randint(-300, 300), 650))
 
-            gov.observe_user_input()
-            if gov.user_is_active():
-                if not paused_for_user:
-                    print("  [Paused] You are using this computer — standing down until you stop.")
-                paused_for_user = True
-                current_mode = None
-                governor_holding = False
-                stop.wait(GOVERNOR_POLL_SECONDS * SLEEP_SCALE)
-                continue
-            if paused_for_user:
-                print("  [Resumed] You have been quiet for a while — carrying on.")
-                paused_for_user = False
+        move_humanlike_adaptive(curr_x, curr_y, target_x, target_y, stop)
 
-            # A fresh profile every cycle. Picking per cycle rather than sticking
-            # with one for a while is deliberate: the point is that no two
-            # consecutive cycles have to look alike.
-            mode = random.choice(MODE_POOL)
-
-            if mode == "THINKING":
-                current_mode = mode
-                governor_holding = False
-                macro_pause = random.uniform(*THINKING_PAUSE)
-                print(f"  [Behaviour: THINKING] Away from the keyboard for {int(macro_pause)}s.")
-                quiet_wait(stop, gov, macro_pause)
-                continue
-
-            # The governor's decision, and the only place a cycle is refused
-            # outright. Asked before any input is generated so a refused cycle
-            # costs nothing at all.
-            if not gov.claim():
-                if not governor_holding:
-                    snap = gov.snapshot()
-                    print(f"  [Governor] Holding: {snap['windowUsedBlocks']} of "
-                          f"{snap['windowTargetBlocks']} blocks used in this 10-minute window.")
-                governor_holding = True
-                current_mode = None
-                stop.wait(GOVERNOR_POLL_SECONDS * SLEEP_SCALE)
-                continue
-            governor_holding = False
-
-            profile = MODE_PROFILES[mode]
-            current_mode = mode
-            print(f"  [Behaviour: {mode}] Processing execution matrix wave.")
-
-            curr_x, curr_y = backend.mouse_position()
-            target_x, target_y = next_pointer_target(curr_x, curr_y, rect, (hop_x, hop_y))
-
-            move_humanlike_adaptive(gov, curr_x, curr_y, target_x, target_y, stop)
-
-            # Both the count and the gap come from this cycle's profile, so the
-            # keyboard burst is 2 s of hammering or 5 s of idle tapping depending
-            # on which one was drawn.
-            strokes = random.randint(*profile["strokes"])
-            sent = 0
-            for _ in range(strokes):
-                if stop.is_set(): break
-                key = SHIFT_MODIFIER if random.random() < SHIFT_PROBABILITY else random.choice(CORE_DENSE_KEYS)
-                if not act(gov, backend.tap_key, key): break
-                sent += 1
-                pause(random.uniform(*profile["key_gap"]))
-            print(f"  - Distributed {sent} safe telemetry hits over separate execution ticks.")
-
-            dice = random.random()
-            if dice < APP_SWITCH_PROBABILITY:
-                simulate_real_app_switch(gov)
-            elif dice < APP_SWITCH_PROBABILITY + TAB_SWITCH_PROBABILITY:
-                hardware_browser_tab_switch(gov)
+        # Both the count and the gap come from this cycle's profile, so the
+        # keyboard burst is 2 s of hammering or 5 s of idle tapping depending
+        # on which one was drawn.
+        strokes = random.randint(*profile["strokes"])
+        for _ in range(strokes):
+            if stop.is_set(): break
+            # WHY 0.22: roughly one stroke in five is a bare Shift, so the burst
+            # is not a pure run of arrow keys.
+            if random.random() < 0.22:
+                backend.tap_key(SHIFT_MODIFIER)
             else:
-                simulate_vertical_scrolling(gov, stop)
+                backend.tap_key(random.choice(CORE_DENSE_KEYS))
+            pause(random.uniform(*profile["key_gap"]))
+        print(f"  - Distributed {strokes} safe telemetry hits over separate execution ticks.")
 
-            if ALLOW_CLICK and random.random() < CLICK_PROBABILITY:
-                pause(CLICK_SETTLE_SECONDS)
-                fx, fy = backend.mouse_position()
-                act(gov, backend.click, fx, fy)
+        # WHY 30 / 30 / 40 %: app switch, browser tab switch and scrolling are
+        # mixed so no single kind of event dominates.
+        dice = random.random()
+        if dice < 0.30:
+            simulate_real_app_switch()
+        elif 0.30 <= dice < 0.60:
+            hardware_browser_tab_switch()
+        else:
+            simulate_vertical_scrolling(stop)
 
-            # The end-of-cycle quiet, again from this cycle's profile, waited in
-            # poll-sized slices so the person and /stop are both noticed at once.
-            quiet_wait(stop, gov, random.uniform(*profile["cycle_sleep"]))
-    finally:
-        current_mode = None
-        paused_for_user = False
-        governor_holding = False
-        current_governor = None
-        run_deadline = None
+        # WHY 0.22: about one cycle in five ends with a click where the pointer
+        # already is; 0.04 s settle before (the 0.02 s hold is in the backend).
+        if random.random() < 0.22:
+            pause(0.04)
+            fx, fy = backend.mouse_position()
+            backend.click(fx, fy)
+
+        # The end-of-cycle quiet, again from this cycle's profile. These were
+        # calibrated by hand around the old single cadence (9.5-12.5 s, about
+        # 41-44 % of ten-second windows containing an action); with the profiles
+        # the average is lower and, more to the point, no longer constant.
+        # test_metrics.py models the older single cadence and is not the source
+        # of these numbers — see lessons.md.
+        # WHY stop.wait() and not time.sleep(): /stop wakes the worker at once
+        # instead of leaving it asleep for up to 24 s.
+        # WHY the scale: the same ENGINE_FAST factor pause() applies (tests only).
+        stop.wait(random.uniform(*profile["cycle_sleep"]) * SLEEP_SCALE)
+    current_mode = None
     print("[Core Engine] Emulation loop ended.")
-
-
-def cycle_seconds(mode, rng):
-    """(input_seconds, quiet_seconds) for one cycle of `mode`.
-
-    The duration model engine/test_metrics.py steps its virtual clock with. It
-    is composed from the same module-level constants the loop itself uses —
-    every number here is imported, none is written down twice — so retuning a
-    profile or a hold time moves the simulation with it.
-
-    It is still a *model*: it assumes no claim is refused mid-cycle and that
-    every backend call takes its nominal time. Both make the simulated cycle a
-    little longer than a truncated real one, which is the conservative
-    direction (a longer cycle touches more blocks, so the simulation cannot
-    flatter the ceiling). Change this function whenever you change the order or
-    the contents of a cycle in loop_worker.
-    """
-    if mode == "THINKING":
-        return 0.0, rng.uniform(*THINKING_PAUSE)
-
-    profile = MODE_PROFILES[mode]
-
-    # The curved pointer move: steps+1 samples, each a gap apart.
-    steps = rng.randint(*MOVE_STEPS)
-    active = (steps + 1) * rng.uniform(*MOVE_SAMPLE_GAP)
-
-    # The keystroke burst: each key is a hold plus a gap.
-    strokes = rng.randint(*profile["strokes"])
-    active += strokes * (rng.uniform(*KEY_HOLD_SECONDS) + rng.uniform(*profile["key_gap"]))
-
-    # One of an app switch, a browser-tab switch or a scroll.
-    dice = rng.random()
-    if dice < APP_SWITCH_PROBABILITY:
-        taps = rng.randint(1, max(1, DEFAULT_APP_COUNT - 1))
-        active += (SWITCH_SHOW_SECONDS
-                   + taps * (SWITCH_TAB_HOLD_SECONDS + SWITCH_TAB_GAP_SECONDS)
-                   + SWITCH_ACTIVATE_SECONDS)
-    elif dice < APP_SWITCH_PROBABILITY + TAB_SWITCH_PROBABILITY:
-        active += rng.uniform(*CHORD_HOLD_SECONDS)
-    else:
-        active += rng.randint(*SCROLL_LINES) * rng.uniform(*SCROLL_GAP)
-
-    if ALLOW_CLICK and rng.random() < CLICK_PROBABILITY:
-        active += CLICK_SETTLE_SECONDS + CLICK_HOLD_SECONDS
-
-    return active, rng.uniform(*profile["cycle_sleep"])
 
 
 def engine_state():
@@ -697,9 +376,6 @@ class EngineBridgeHandler(BaseHTTPRequestHandler):
         if path == '/status':
             with thread_lock:
                 state = engine_state()
-            running = state == "RUNNING"
-            gov = current_governor
-            deadline = run_deadline
             self._send_json({
                 "status": state,
                 "backend": backend.name,
@@ -711,16 +387,7 @@ class EngineBridgeHandler(BaseHTTPRequestHandler):
                 "warning": input_warning(),
                 # None unless a loop is actually running, so a stale mode from
                 # the last run can never be shown next to IDLE.
-                "mode": current_mode if running else None,
-                # WHY the governor is in here at all: the whole tool now makes a
-                # specific numeric promise about how active it will look, and
-                # the console is the only surface anyone looks at. A promise
-                # nobody can check is not a promise.
-                "governor": gov.snapshot(holding=governor_holding) if (running and gov is not None) else None,
-                "pausedForUser": bool(paused_for_user) if running else False,
-                "runSecondsRemaining": max(0.0, deadline - engine_time()) if (running and deadline is not None) else None,
-                "maxRunHours": MAX_RUN_HOURS,
-                "clickEnabled": ALLOW_CLICK,
+                "mode": current_mode if state == "RUNNING" else None,
             })
         elif path in ('/', '/index.html'):
             self._send_console()
@@ -825,18 +492,10 @@ def main():
     signal.signal(signal.SIGTERM, _on_sigterm)
     server = HTTPServer((BIND_HOST, PORT), EngineBridgeHandler)
     width, height = backend.screen_size()
-    left, top, right, bottom = target_rectangle(width, height)
     print("=========================================================")
     print(f"🚀 TARGET-CALIBRATED ENGINE V20.0 ON PORT {PORT}")
     print(f"   Console: http://{BIND_HOST}:{PORT}/")
     print(f"   Backend: {backend.name} on {sys.platform} ({backend.platform_note}); screen {width}x{height}")
-    print(f"   Pointer stays inside x {left}-{right}, y {top}-{bottom}")
-    low, high = governor_module.WINDOW_TARGET_BLOCKS
-    print(f"   Activity: {low}-{high} of {governor_module.BLOCKS_PER_WINDOW} ten-second blocks per "
-          f"10-minute window, hard ceiling {governor_module.CEILING_BLOCKS} "
-          f"({governor_module.CEILING_PERCENT:g}%)")
-    print(f"   Clicking: {'ON (ENGINE_ALLOW_CLICK=1)' if ALLOW_CLICK else 'off — set ENGINE_ALLOW_CLICK=1 to enable'}")
-    print(f"   Run limit: {('%g hour(s)' % MAX_RUN_HOURS) if MAX_RUN_HOURS > 0 else 'none (ENGINE_MAX_HOURS=0)'}")
     print("=========================================================")
     # WHY repeat the warning here as a block: run.sh opens the console in a
     # browser, so the terminal is usually behind it — but someone who started
