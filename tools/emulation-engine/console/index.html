@@ -134,12 +134,10 @@
       System Settings → Privacy &amp; Security → Accessibility; on Linux the engine needs an X11 session, not Wayland.
     </p>
     <p class="muted">
-      It keeps its own activity inside a measured band, and makes sure that band is not a flat line. A tracker
-      scores ten minutes as 60 blocks of ten seconds, counting a block as active if anything happened in it.
-      The engine gives each ten minutes its own share of those blocks &mdash; some as low as 10%, some near 60%,
-      with a quiet one never more than four windows away &mdash; so an hour and a half of it looks like a person's
-      afternoon rather than a machine holding a steady rate. It never goes above 65% of the blocks, spreads each
-      share across its whole window, and counts <em>your</em> typing against the same share. It stops on its own after a few hours, and it pauses
+      It keeps its own activity inside a measured band. A tracker scores ten minutes as 60 blocks of ten seconds,
+      counting a block as active if anything happened in it; the engine gives each window a random share of those
+      blocks, never goes above 65% of them, spreads the share across the whole window, and counts
+      <em>your</em> typing against the same share. It stops on its own after a few hours, and it pauses
       completely while you are using the computer. Clicking is off unless you start it with
       <code>ENGINE_ALLOW_CLICK=1</code>.
     </p>

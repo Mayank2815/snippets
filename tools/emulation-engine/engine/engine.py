@@ -229,51 +229,6 @@ MODE_POOL = ["BURST", "BURST", "STANDARD", "STANDARD", "STANDARD",
 # about a minute away in every ten cycles.
 THINKING_PAUSE = (40.0, 70.0)
 
-def busy_mode_pool():
-    """MODE_POOL with the away-from-the-keyboard profile taken out.
-
-    WHY it is computed on each call rather than once at import: the engine
-    tests pin MODE_POOL to a single profile to isolate one behaviour, and a
-    pool captured at import would ignore them and let a "THINKING only" test
-    draw a BURST.
-    """
-    return [mode for mode in MODE_POOL if mode != "THINKING"]
-
-
-def choose_mode(rng, gov):
-    """Pick this cycle's profile. Returns (mode, thinking_pause_or_None).
-
-    WHY the governor gets a say in this, when everywhere else the profiles
-    decide the texture and the governor only decides whether a cycle runs at
-    all: the THINKING pause is 40-70 seconds, which is four to seven of the
-    window's sixty ten-second blocks, and it happens whether or not the window
-    can spare them. Measured over thousands of simulated three-hour runs, that
-    single profile was the whole of the gap between a window's budget and what
-    it actually scored — and worse, it made a busy window's score swing from 30
-    % to 60 % at random, which is what dragged entire runs under the 38 %
-    floor.
-    So the pause now asks first. In a quiet window — and a third of them are
-    now genuinely quiet — there is slack for hours and the answer is always
-    yes, which is the right place for it: the ten minutes a person is away IS
-    their quiet ten minutes. In a window that has committed to being busy the
-    answer is usually no and the loop simply draws a working profile instead.
-
-    `rng` is the `random` module in the real loop and a seeded Random in the
-    simulator, which is the only reason both can share this function.
-    """
-    mode = rng.choice(MODE_POOL)
-    if mode != "THINKING":
-        return mode, None
-    macro_pause = rng.uniform(*THINKING_PAUSE)
-    if gov.pause_is_affordable(macro_pause):
-        return mode, macro_pause
-    # WHY the fallback guard: the engine tests pin MODE_POOL to THINKING alone
-    # to check that it generates nothing, and there would be nothing to draw.
-    working = busy_mode_pool()
-    if not working:
-        return mode, macro_pause
-    return rng.choice(working), None
-
 # --- WHERE THE POINTER GOES -------------------------------------------------
 # WHY a fraction of the real screen and not a fixed rectangle: the loop used to
 # clamp to x 200-1100, y 200-650 — numbers written for a 13" 1280x800 display.
@@ -545,11 +500,12 @@ def loop_worker(stop, gov=None, deadline=None):
             # A fresh profile every cycle. Picking per cycle rather than sticking
             # with one for a while is deliberate: the point is that no two
             # consecutive cycles have to look alike.
-            mode, macro_pause = choose_mode(random, gov)
+            mode = random.choice(MODE_POOL)
 
             if mode == "THINKING":
                 current_mode = mode
                 governor_holding = False
+                macro_pause = random.uniform(*THINKING_PAUSE)
                 print(f"  [Behaviour: THINKING] Away from the keyboard for {int(macro_pause)}s.")
                 quiet_wait(stop, gov, macro_pause)
                 continue
@@ -876,13 +832,9 @@ def main():
     print(f"   Backend: {backend.name} on {sys.platform} ({backend.platform_note}); screen {width}x{height}")
     print(f"   Pointer stays inside x {left}-{right}, y {top}-{bottom}")
     low, high = governor_module.WINDOW_TARGET_BLOCKS
-    blocks = governor_module.BLOCKS_PER_WINDOW
-    print(f"   Activity: {low}-{high} of {blocks} ten-second blocks per 10-minute window "
-          f"({low / blocks * 100:.0f}-{high / blocks * 100:.0f}%), hard ceiling "
-          f"{governor_module.CEILING_BLOCKS} ({governor_module.CEILING_PERCENT:g}%)")
-    print(f"   Variation: a quiet window (under {governor_module.QUIET_WINDOW_PERCENT:g}%) at least "
-          f"once in every {governor_module.DEAL_SPACING}, so no 90 minutes looks flat; "
-          f"average {governor_module.BAND_LOW_PERCENT:g}-{governor_module.BAND_HIGH_PERCENT:g}%")
+    print(f"   Activity: {low}-{high} of {governor_module.BLOCKS_PER_WINDOW} ten-second blocks per "
+          f"10-minute window, hard ceiling {governor_module.CEILING_BLOCKS} "
+          f"({governor_module.CEILING_PERCENT:g}%)")
     print(f"   Clicking: {'ON (ENGINE_ALLOW_CLICK=1)' if ALLOW_CLICK else 'off — set ENGINE_ALLOW_CLICK=1 to enable'}")
     print(f"   Run limit: {('%g hour(s)' % MAX_RUN_HOURS) if MAX_RUN_HOURS > 0 else 'none (ENGINE_MAX_HOURS=0)'}")
     print("=========================================================")
