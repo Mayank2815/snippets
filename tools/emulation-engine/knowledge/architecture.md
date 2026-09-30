@@ -80,71 +80,23 @@ block exactly as hard as a hundred. Your score is the percentage ticked. Every
 number in this module is in those units, because reasoning in any other unit
 would be reasoning about the wrong thing.
 
-### The five rules
+### The four rules
 
 1. **A hard ceiling (`CEILING_BLOCKS` = 39, i.e. 65 %).** Checked on every
    claim, separately from the window target, so it survives any retuning of the
    draw. It is checked over a **rolling** ten minutes, not only the windows the
    engine lines up with — a tracker does not have to share our clock.
-2. **A wildly different budget per window, dealt from a bag.**
-   `WINDOW_TARGET_BAG` holds nine budgets in three groups — quiet (6, 12, 18
-   blocks = 10 %, 20 %, 30 %), middling (24, 30) and busy (34, 35, 36, 36) —
-   each nudged by ±2 blocks of jitter. See "the bag's fixed sum" below for why
-   this does not cost the average anything.
-3. **The deal order is constrained, not merely shuffled.** A quiet budget and a
-   busy one must both appear in every `DEAL_SPACING` (4) consecutive draws; two
-   consecutive budgets must differ by at least 2 blocks; three consecutive must
-   span at least 4. All three are checked **across the seam between one bag and
-   the next**, which is where a plain shuffle puts eight similar windows in a
-   row. See "why the deal order is the whole guarantee".
-4. **Pacing, with a per-window shape.** At block *e* of 60, at most
-   `ceil(target x (e/60) ** shape)` blocks may have been spent. The shape is
-   drawn per window — below 1 front-loads, above 1 back-loads — and its swing
-   shrinks to nothing as the budget approaches the ceiling, because
-   back-loading a busy window spends into the next window's first half and the
-   rolling ceiling would simply refuse it.
-5. **The person's input counts against the same budget.** Otherwise the engine
+2. **A random budget per window, from a shuffled bag.** `WINDOW_TARGET_BAG`
+   holds six budgets (22-33 blocks, 37 %-55 %); they are dealt in random order
+   and the bag is refilled and reshuffled when empty, and each is nudged by
+   ±1 block of jitter. Each window is a surprise; any six consecutive windows
+   average the bag's own mean.
+3. **Pacing.** At block *e* of 60, at most `ceil(target x e / 60)` blocks may
+   have been spent. Front-loading is its own pattern and would fail a rolling
+   read anyway.
+4. **The person's input counts against the same budget.** Otherwise the engine
    adds to a score that is already being earned, and the combined figure leaves
    the band from below.
-
-### The bag's fixed sum is what buys wide windows for free
-
-This is the property the first version of the governor had and did not use. **A
-bag has a fixed sum**, so every full cycle of it averages the same thing
-whatever order it is dealt in. The individual windows may therefore swing as
-violently as you like — 10 % to 60 % — and the long-run average does not move.
-
-The first version narrowed the bag to 22-33 blocks to protect the average,
-which was solving a problem the bag had already solved, and the cost was that
-the engine never produced a quiet window at all. Three hours is eighteen
-windows, which is exactly two cycles of the nine-value bag, which is why the
-run-to-run spread of the average is now only ±2 points (sd 0.54) despite
-individual windows spanning 7 %-63 %.
-
-Nine values is also not an accident: the tracker's complaint was about 90
-minutes, which is nine of our windows, so one full cycle of the bag fits inside
-every stretch long enough to be flagged.
-
-### Why the deal order is the whole guarantee
-
-The variance promise ("any nine consecutive windows span at least 25 points")
-is not a measurement that happened to come out well — it follows from rule 3.
-If a quiet budget appears in every four consecutive draws, then any nine
-consecutive windows contain two whole disjoint runs of four, so they contain a
-quiet window; the same argument gives a busy one; and the range follows from
-the gap between the two groups.
-
-The rules are enforced by rejection sampling — shuffle the bag, apply the
-jitter, check, retry — which cannot bias *which* values are dealt, only their
-order and their nudge, both symmetric about the value. So the fixed sum
-survives. Measured: zero fallbacks in 2,000 runs, and the bag's dealt mean
-matches its designed mean to within 0.2 blocks.
-
-The jitter is drawn **here**, with the order, and not at the moment a budget is
-handed out. That is deliberate: two values two blocks apart, jittered +2 and
-−2, come out identical, and measured, that was happening to about one adjacent
-pair in a hundred. A rule checked before the jitter is a rule about something
-the window never runs on.
 
 ### Telling the person's input from the engine's own
 
@@ -193,11 +145,9 @@ check: it is the only form of the ceiling that means what the requirement says.
 the real loop driving the real governor, and does it hundreds of times in about
 a second. Every constant it uses is imported from `engine.py` and
 `governor.py`; it declares none of its own. Measured over 2,000 runs at the
-shipped settings: average **42.78 %**, spread 40.83 %-44.35 %, sd 0.54, worst
-single window 63.3 %, worst rolling window 65.0 %, **none outside the 38-47 %
-band and none over the ceiling**; tightest 90 minutes **28.3 points of range**
-and 10.0 of standard deviation against floors of 25 and 8; 22.2 % of all
-windows under 25 %; every ten-point band from 0 % to 63 % populated.
+shipped settings: average **43.11 %**, spread 39.81 %-45.46 %, sd 0.83, worst
+single window 56.7 %, worst rolling window 65.0 %, **none outside the 38-47 %
+band and none over the ceiling**.
 
 ### Why the profiles were retuned at the same time
 
@@ -211,27 +161,6 @@ be. THINKING dropped from one draw in six to one in ten for the same reason: it
 used to be the mechanism that held the rate down, the governor is that now, and
 at one in six it cost about two and a half points of the average by throwing
 away pro-rata opportunity that had already been granted.
-
-### Why THINKING had to ask permission (2026-09-29)
-
-Re-measuring the loop's shortfall while widening the bag produced a flat
-answer: **THINKING was the entire shortfall.** With it removed from the pool the
-loop hits its budget exactly — 30 of 30, 33 of 33, 39 of 39, every window, at
-every level. With it in, a budget of 36 realised 32.4 on average and as little
-as 18.
-
-That mattered twice over. It capped the reachable rate near 55 %, which is what
-made a third of windows at 10 % arithmetically impossible; and it made a busy
-window's score *unpredictable*, which is what widened the run-average spread
-until whole three-hour runs fell under the 38 % floor.
-
-So `choose_mode` in `engine.py` now asks `gov.pause_is_affordable(seconds)`
-first: after this pause, will the window still have at least as many blocks
-left as it has budget left to spend in them? In a quiet window the answer is
-always yes; in a busy one it is usually no, and the loop draws a working
-profile instead. The shortfall went to ~0.01 blocks at every budget, the
-run-average sd from 1.1 to 0.54, and the quiet windows got the long human gaps
-— which is where a person's long gaps actually are.
 
 ## Pausing while the person works
 
