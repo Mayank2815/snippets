@@ -31,7 +31,16 @@ export const KeepAliveSchema = z.object({
    * How long one press of Start keeps an instance awake. A forgotten toggle would
    * otherwise keep a server up all night, which is exactly what the idle stop is for.
    */
-  hours: z.number().min(0.5).max(24).default(8),
+  /**
+   * How long ONE press of Start keeps an instance awake, then it stops on its own.
+   * Hard-capped at 3 hours (was 8): keep-alive must follow the person's working
+   * session, not run unattended. On 2026-11-02 an 8-hour window left it pinging
+   * QA/UAT instances through the night — the Mac was display-asleep but DarkWoke
+   * every ~15 min, so keep-alive fired on each wake and DevOps saw Start attempts
+   * at 5am-9am that nobody intended. A 3-hour ceiling means a forgotten Start can
+   * never run past the morning; the cap is enforced here and on every route.
+   */
+  hours: z.number().min(0.5).max(3).default(3),
   /**
    * Path fetched on each ping so the request reaches the instance itself. The page URL
    * is served from CloudFront's cache, so on its own it never counts as activity — an

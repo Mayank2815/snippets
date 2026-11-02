@@ -100,3 +100,15 @@ fine — it still reached the server.
   make the host think the service is dead and restart it forever.
 - **Say something useful on `EADDRINUSE`.** A stale process holding the port otherwise
   makes a supervisor crash-loop in silence; the server prints the `lsof` command to find it.
+
+- **2026-11-02. A Start kept an instance awake for 8 hours, so it ran all night.**
+  The per-Start window defaulted to 8 h. Someone pressing Start in the evening and
+  walking away left keep-alive pinging QA/UAT instances overnight. The Mac was
+  display-asleep but macOS DarkWoke it every ~15 minutes for maintenance, and
+  keep-alive (10-min interval) fired on each DarkWake — so DevOps saw start attempts
+  at 5:09, 5:21, 5:52, 9:10, 9:39 am that nobody intended, and a merged backend
+  (QA17C via SMQA) woke too. Fix: the window is hard-capped at **3 hours** (default 3,
+  schema `max(3)`, rejected on every route and in the dashboard input). Start → ticks;
+  Stop → halts at once (only `isKept` instances are ever pinged); and now a forgotten
+  Start stops itself within 3 hours whatever the reason. Not a DevOps block — pings
+  return HTTP 401 ("reached the server"), i.e. the server still answers.

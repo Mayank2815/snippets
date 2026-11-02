@@ -80,7 +80,7 @@ export function KeepAlivePanel() {
       <h2>Keep instances awake</h2>
       <p className="muted" style={{ marginTop: -8 }}>
         Dev and QA servers stop after 20 idle minutes. Press Start on the one you are working on: it is pinged every
-        {' '}{data?.pingMinutes ?? 5} minutes for {data?.hours ?? 8} hours, and started again if it goes down.
+        {' '}{data?.pingMinutes ?? 5} minutes for {data?.hours ?? 3} hours, and started again if it goes down.
       </p>
 
       <div className="grid" style={{ alignItems: 'end' }}>
@@ -135,7 +135,7 @@ export function KeepAlivePanel() {
             <input type="number" min={1} max={15} {...numberField('pingMinutes', data.pingMinutes)} />
           </label>
           <label className="field">Keep for (hours per Start)
-            <input type="number" min={0.5} max={24} step={0.5} {...numberField('hours', data.hours)} />
+            <input type="number" min={0.5} max={3} step={0.5} {...numberField('hours', data.hours)} />
           </label>
           <label className="field" style={{ gridColumn: 'span 2' }}>Activity path (the page itself is cached by CloudFront, so each ping also fetches this from the server)
             <input value={data.activityPath} placeholder="/rest/api/users/isMySessionActive"

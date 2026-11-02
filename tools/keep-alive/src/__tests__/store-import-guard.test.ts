@@ -25,7 +25,7 @@ const IMPORTED_AT = '2026-09-28T09:00:00.000Z';
 writeFileSync(join(dataDir, 'keep-alive.json'), JSON.stringify({
   instances: [],
   pingMinutes: 5,
-  hours: 8,
+  hours: 3,
   activityPath: '/rest/api/users/isMySessionActive',
   importedAt: IMPORTED_AT,
 }));
