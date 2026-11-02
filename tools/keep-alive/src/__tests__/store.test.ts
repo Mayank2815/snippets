@@ -16,7 +16,7 @@ writeFileSync(legacyPath, JSON.stringify({
     keepAlive: {
       instances: [{ id: 'client-9-qa-example-cloud', url: 'https://client-9.qa.example.cloud/', label: 'QA9C', keepUntil: null, app: 'QA9C', autoStart: true }],
       pingMinutes: 7,
-      hours: 4,
+      hours: 2,
       activityPath: '/custom',
     },
   },
@@ -32,7 +32,7 @@ test('a first start copies the kept list out of task-notif, and only the list', 
   assert.equal(data.instances.length, 1);
   assert.equal(data.instances[0]!.label, 'QA9C');
   assert.equal(data.pingMinutes, 5, 'settings are not taken from the legacy block');
-  assert.equal(data.hours, 8);
+  assert.equal(data.hours, 3);
   assert.equal(data.activityPath, '/rest/api/users/isMySessionActive');
   assert.match(data.importedAt!, /^\d{4}-\d{2}-\d{2}T/, 'the import is recorded, which is what stops it running again');
   assert.ok(existsSync(storePath), 'the import is written, so the next start finds importedAt set and skips it');

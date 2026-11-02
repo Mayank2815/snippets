@@ -41,7 +41,7 @@ function world(state: 'running' | 'stopped' | 'starting') {
   return { calls, fetchFn, get state() { return state; }, up() { state = 'running'; } };
 }
 
-const reset = () => setKeepAlive({ instances: [], pingMinutes: 5, hours: 8, activityPath: '/rest/api/users/isMySessionActive' });
+const reset = () => setKeepAlive({ instances: [], pingMinutes: 5, hours: 3, activityPath: '/rest/api/users/isMySessionActive' });
 
 test('the maintenance wrapper gives away the app name, and the page its management API', () => {
   assert.deepEqual(parseMaintenance(WRAPPER), {
@@ -125,7 +125,7 @@ test('Start keeps it for the configured hours and pings it straight away', async
   const now = new Date('2026-09-23T10:00:00Z');
   const v = (await k.keep('client-9-qa-example-cloud', undefined, now))!;
   assert.equal(v.keeping, true);
-  assert.equal(v.keepUntil, '2026-09-23T18:00:00.000Z');
+  assert.equal(v.keepUntil, '2026-09-23T13:00:00.000Z');
   assert.equal(v.state, 'running');
   assert.equal(v.lastPingAt, now.toISOString());
   assert.equal(v.nextPingAt, '2026-09-23T10:05:00.000Z');

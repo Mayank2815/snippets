@@ -36,7 +36,7 @@ async function api(path: string, init?: RequestInit): Promise<{ status: number; 
 test('GET /api/keeper starts empty, with the settings the schema defaults to', async () => {
   const { status, body } = await api('/keeper');
   assert.equal(status, 200);
-  assert.deepEqual(body, { instances: [], pingMinutes: 5, hours: 8, activityPath: '/rest/api/users/isMySessionActive' });
+  assert.deepEqual(body, { instances: [], pingMinutes: 5, hours: 3, activityPath: '/rest/api/users/isMySessionActive' });
 });
 
 test('POST /api/keeper/instances adds by URL; a bad URL is a 400 and not a crash', async () => {
@@ -105,7 +105,7 @@ test('PUT /api/keeper changes only the settings it is given, and refuses bad one
   const ok = await api('/keeper', { method: 'PUT', body: JSON.stringify({ pingMinutes: 3 }) });
   assert.equal(ok.status, 200);
   assert.equal(ok.body.pingMinutes, 3);
-  assert.equal(ok.body.hours, 8, 'untouched settings keep their value');
+  assert.equal(ok.body.hours, 3, 'untouched settings keep their value');
   assert.equal(ok.body.activityPath, '/rest/api/users/isMySessionActive', 'a patch with only pingMinutes leaves activityPath alone');
   assert.equal(ok.body.instances.length, 1, 'the list is not part of the settings and is left alone');
 
