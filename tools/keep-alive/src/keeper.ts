@@ -58,8 +58,14 @@ const BOOT_WINDOW_MS = 15 * 60_000;
 /** A page that takes longer than this is not "up" in any useful sense. */
 const FETCH_TIMEOUT_MS = 20_000;
 
-/** Traffic from here should be recognisable in a log, not mistaken for a browser. */
-const USER_AGENT = 'keep-alive (dev/QA instance keeper)';
+/**
+ * Identifies this keeper in the target's access logs — deliberately a clear,
+ * honest name, never a browser string, so DevOps can see and whitelist it.
+ * Renamed on 2026-11-02: DevOps had blocked start requests carrying the previous
+ * User-Agent ('keep-alive (dev/QA instance keeper)') and asked for a different
+ * identifier. Change it here if they ever ask for another.
+ */
+const USER_AGENT = 'expertly-qa-keeper/1.0';
 
 /**
  * CloudFront serves this wrapper in place of a stopped instance: a page embedding the
