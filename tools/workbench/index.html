@@ -215,9 +215,19 @@
       });
   }
 
-  var initial = 'task-notif';
-  try { initial = localStorage.getItem('snippets.tab') || initial; } catch (e) { /* ignore */ }
-  if (!tabs.some(function (t) { return t.dataset.tab === initial; })) initial = 'task-notif';
+  var initial = null;
+  try {
+    var tabParam = new URLSearchParams(location.search).get('tab');
+    if (tabParam && tabs.some(function (t) { return t.dataset.tab === tabParam; })) {
+      initial = tabParam;
+    }
+  } catch (e) {}
+  if (!initial) {
+    try { initial = localStorage.getItem('snippets.tab'); } catch (e) {}
+  }
+  if (!initial || !tabs.some(function (t) { return t.dataset.tab === initial; })) {
+    initial = 'emulation-engine';
+  }
   show(initial);
   checkEngine();
   setInterval(checkEngine, ENGINE_POLL_MS);
