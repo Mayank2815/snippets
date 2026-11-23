@@ -1,5 +1,5 @@
 import { DateTime } from 'luxon';
-import type { Config, Job, JobKind } from '../config/schema.js';
+import type { Config, Job, JobKind, RunRecord } from '../config/schema.js';
 import { getConfig, getRuns } from '../config/store.js';
 import { runAndDeliver } from '../deliver.js';
 
@@ -68,23 +68,71 @@ export function nextFireTime(config: Config, job: Job, from: DateTime = DateTime
 }
 
 /**
- * True when the job's slot has passed, is still within grace, and nothing was
- * successfully sent for it yet. `lastSuccessfulRunAt` must be a successful run —
- * passing a failed one here would silently cancel the catch-up.
+ * The job's slot for `now`'s day if it has passed and is still inside the grace window;
+ * otherwise null (before the slot, past grace, a disabled day, or disabled at all). This
+ * is the single home for the catch-up window maths that both the simple contract below and
+ * the per-recipient computation share.
  */
-export function shouldCatchUp(config: Config, job: Job, now: DateTime, lastSuccessfulRunAt: string | null): boolean {
-  if (!config.enabled || !job.enabled) return false;
+export function catchUpSlot(config: Config, job: Job, now: DateTime): DateTime | null {
+  if (!config.enabled || !job.enabled) return null;
 
   const local = now.setZone(config.timezone);
-  if (!job.daysOfWeek.includes(local.weekday)) return false;
+  if (!job.daysOfWeek.includes(local.weekday)) return null;
 
   const [hourStr, minuteStr] = job.time.split(':');
   const slot = local.set({ hour: Number(hourStr), minute: Number(minuteStr), second: 0, millisecond: 0 });
-  if (local < slot) return false;
-  if (local > slot.plus({ minutes: config.catchUpGraceMinutes })) return false;
+  if (local < slot) return null;
+  if (local > slot.plus({ minutes: config.catchUpGraceMinutes })) return null;
+  return slot;
+}
 
+/**
+ * True when the job's slot has passed, is still within grace, and nothing was
+ * successfully sent for it yet. `lastSuccessfulRunAt` must be a successful run —
+ * passing a failed one here would silently cancel the catch-up.
+ *
+ * This is the tested single-recipient contract for the window. The scheduler generalises
+ * it per recipient through `recipientsOwedForSlot` (see 2026-11-23): one recipient failing
+ * must re-send the slot to that person only, not to everyone who already got it.
+ */
+export function shouldCatchUp(config: Config, job: Job, now: DateTime, lastSuccessfulRunAt: string | null): boolean {
+  const slot = catchUpSlot(config, job, now);
+  if (!slot) return false;
   if (!lastSuccessfulRunAt) return true;
   return DateTime.fromISO(lastSuccessfulRunAt).setZone(config.timezone) < slot;
+}
+
+/**
+ * Who a run at or after `slot` has already settled for this job: anyone recorded with no
+ * error — a delivered message, or an intentional "nothing to send". Settled recipients
+ * must never be sent to again for the same slot, which is what stops a late timer or a
+ * catch-up poll from re-delivering to people who already received it.
+ */
+export function recipientsSettledForSlot(kind: JobKind, slot: DateTime, runs: RunRecord[]): Set<string> {
+  const settled = new Set<string>();
+  for (const run of runs) {
+    if (run.job !== kind) continue;
+    if (DateTime.fromISO(run.at) < slot) continue;
+    for (const p of run.perRecipient) if (p.error === null) settled.add(p.id);
+  }
+  return settled;
+}
+
+/**
+ * The enabled recipients a catch-up still owes this job's slot: those not yet settled,
+ * when the window is open. Empty when the window is shut or everyone has been settled.
+ *
+ * This is the fix for the 2026-11-23 amplification: before, a run counted as "done" only
+ * if EVERY recipient succeeded, so one person's permanent failure (an oversized digest that
+ * Slack rejected) left the slot forever "owed" and the catch-up poll re-sent it to the
+ * three who had succeeded every fifteen minutes. Keyed per recipient, only the person still
+ * owed is retried.
+ */
+export function recipientsOwedForSlot(config: Config, kind: JobKind, now: DateTime, runs: RunRecord[]): string[] {
+  const slot = catchUpSlot(config, config.jobs[kind], now);
+  if (!slot) return [];
+  const settled = recipientsSettledForSlot(kind, slot, runs);
+  return config.recipients.filter((r) => r.enabled && !settled.has(r.id)).map((r) => r.id);
 }
 
 /** How long to wait before the next look: the slot if it is close, otherwise one tick. */
@@ -96,6 +144,10 @@ export function timerDelayMs(next: DateTime, now: DateTime = DateTime.now()): nu
  * True when a successful run already satisfied this slot, whoever triggered it. The
  * catch-up poll may have sent a slot before a late timer gets to it; firing again would
  * deliver the same message twice.
+ *
+ * The tested single-recipient contract for the "already sent" check. The scheduler now
+ * applies this per recipient via `recipientsSettledForSlot`, so a slot delivered to only
+ * some recipients is re-sent to the rest without double-sending the ones who got it.
  */
 export function slotAlreadyDelivered(slot: DateTime, lastSuccessfulRunAt: string | null): boolean {
   if (!lastSuccessfulRunAt) return false;
@@ -124,9 +176,12 @@ export class Scheduler {
     this.scheduleAll();
   }
 
-  /** Fires any slot that is still owed and still inside its grace window. */
+  /** Fires any slot that is still owed, to the recipients still owed it, inside grace. */
   private catchUp(): void {
     const config = getConfig();
+    const now = DateTime.now();
+    const runs = getRuns();
+    const enabledCount = config.recipients.filter((r) => r.enabled).length;
     for (const kind of JOB_KINDS) {
       // A restart during a slot must not silently skip it.
       if (process.env.SUPPRESS_CATCHUP === '1') {
@@ -137,15 +192,14 @@ export class Scheduler {
       // Starting another here would deliver the same message twice.
       if (this.running.has(kind) || this.retryTimers.has(kind)) continue;
 
-      // Any SUCCESSFUL send satisfies the slot, however it was triggered. Sending the
-      // missed reminder by hand and then restarting must not deliver it a second time.
-      // Failures are excluded: that slot is still owed.
-      const last = getRuns().find((r) => r.job === kind && r.ok)?.at ?? null;
-      if (shouldCatchUp(config, config.jobs[kind], DateTime.now(), last)) {
-        const slot = config.jobs[kind].time;
-        this.log(`${kind}: ${slot} slot still owed — sending it now`);
-        void this.fire(kind, lateNote(slot));
-      }
+      // Per recipient: a delivered message or an intentional "nothing to send" settles a
+      // person for the slot, however it was triggered. Only those still owed are re-sent,
+      // so one recipient's failure never re-delivers to everyone who already got it.
+      const owed = recipientsOwedForSlot(config, kind, now, runs);
+      if (owed.length === 0) continue;
+      const slot = config.jobs[kind].time;
+      this.log(`${kind}: ${slot} slot still owed to ${owed.length} of ${enabledCount} — sending to ${owed.join(', ')}`);
+      void this.fire(kind, lateNote(slot), 0, owed);
     }
   }
 
@@ -207,10 +261,13 @@ export class Scheduler {
           return;
         }
         // A timer that fires late (the machine slept) may find the catch-up poll already
-        // sent this slot. Then there is nothing to do but move on to the next one.
-        const last = getRuns().find((r) => r.job === kind && r.ok)?.at ?? null;
-        if (slotAlreadyDelivered(next, last)) {
-          this.log(`${kind}: ${next.toFormat('HH:mm')} slot was already delivered at ${DateTime.fromISO(last!).setZone(config.timezone).toFormat('HH:mm')} — skipping the late timer`);
+        // sent this slot to some or all recipients. Only those still owed are sent, so no
+        // one who already received it gets it twice.
+        const settled = recipientsSettledForSlot(kind, next, getRuns());
+        const enabled = config.recipients.filter((r) => r.enabled).map((r) => r.id);
+        const owed = enabled.filter((id) => !settled.has(id));
+        if (owed.length === 0) {
+          this.log(`${kind}: ${next.toFormat('HH:mm')} slot was already delivered to everyone — skipping the late timer`);
           this.schedule(kind);
           return;
         }
@@ -218,7 +275,10 @@ export class Scheduler {
         // message; the timer must mark it too, or the same delay reads differently
         // depending on which path happened to win the race on wake.
         const late = DateTime.now().diff(next).toMillis() > ON_TIME_GRACE_MS;
-        void this.fire(kind, late ? lateNote(config.jobs[kind].time) : undefined).finally(() => this.schedule(kind));
+        // On time this is every enabled recipient, so send to all (undefined); a late timer
+        // after a partial catch-up targets only who is left.
+        const subset = owed.length === enabled.length ? undefined : owed;
+        void this.fire(kind, late ? lateNote(config.jobs[kind].time) : undefined, 0, subset).finally(() => this.schedule(kind));
       }, delay),
     );
   }
@@ -226,8 +286,10 @@ export class Scheduler {
   /**
    * Runs the job, retrying transient failures rather than losing the day.
    * `attempt` is 0 for the scheduled run and increments per retry.
+   * `onlyRecipientIds`, when given, narrows the send to those recipients — the catch-up
+   * poll and a late timer use it to reach only who is still owed the slot.
    */
-  async fire(kind: JobKind, note?: string, attempt = 0): Promise<void> {
+  async fire(kind: JobKind, note?: string, attempt = 0, onlyRecipientIds?: string[]): Promise<void> {
     if (this.running.has(kind)) {
       this.log(`${kind}: previous run still in flight — skipping this tick`);
       return;
@@ -237,7 +299,7 @@ export class Scheduler {
     try {
       const started = Date.now();
       await Promise.race([
-        runAndDeliver(getConfig(), this.deps.teamworkToken, this.deps.slackToken, kind, 'scheduled', this.log, note),
+        runAndDeliver(getConfig(), this.deps.teamworkToken, this.deps.slackToken, kind, 'scheduled', this.log, note, onlyRecipientIds),
         new Promise((_, reject) =>
           setTimeout(() => reject(new Error(`run exceeded ${RUN_TIMEOUT_MS / 60_000} minutes`)), RUN_TIMEOUT_MS),
         ),
@@ -254,7 +316,7 @@ export class Scheduler {
       }
 
       this.log(`${kind}: run failed (${message}) — retry ${attempt + 1} in ${Math.round(delay / 60_000)} min`);
-      const timer = setTimeout(() => void this.fire(kind, note ?? '⏰ Late — the first attempt could not reach the network', attempt + 1), delay);
+      const timer = setTimeout(() => void this.fire(kind, note ?? '⏰ Late — the first attempt could not reach the network', attempt + 1, onlyRecipientIds), delay);
       this.retryTimers.set(kind, timer);
     } finally {
       this.running.delete(kind);

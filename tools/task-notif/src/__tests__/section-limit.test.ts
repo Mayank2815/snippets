@@ -87,3 +87,41 @@ test("a long Monday stand-up in the morning reminder fits too", () => {
   for (const t of texts(msg.blocks)) assert.ok(t.length <= SECTION_MAX, `a section is ${t.length} chars`);
   assert.ok(msg.blocks.length <= 50);
 });
+
+// On 2026-11-23 one recipient's evening digest returned invalid_blocks on every run: a
+// single Teamwork comment ran past Slack's 3,000-char per-section limit. The per-item
+// update/mention rows were the only sections whose comment text was never length-capped.
+const giantComment = 'word '.repeat(1000); // ~5,000 chars — well past the limit on its own
+const digestWithGiantComment = () => ({
+  recipient: { id: 'rohit', label: 'Rohit' },
+  identity: { displayName: 'Rohit' },
+  dayLabel: 'Monday, 23 November',
+  updates: [{
+    taskId: 1, taskName: 'A real task', taskLink: 'https://tw/app/tasks/1', link: 'https://tw/app/tasks/1?c=1',
+    project: 'Web', text: giantComment, at: '2026-11-23T10:00:00Z', isDone: false, isBlocker: false, prLinks: [],
+  }],
+  completed: [], statusChanges: [], newlyAssigned: [],
+  mentionsOpen: [{ taskId: 2, taskName: 'Asked task', link: 'https://tw/app/tasks/2?c=1', text: giantComment, author: 'Someone', at: '2026-11-23T11:00:00Z' }],
+  mentionsAnswered: [], slackReplied: [], slackAwaiting: [], slackActivity: [], meetings: [],
+  dayOffset: 0, total: 2, summary: null,
+}) as never;
+
+test('the fixture comment is really over the per-section limit', () => {
+  assert.ok(giantComment.length > SECTION_MAX, `fixture is ${giantComment.length} chars`);
+});
+
+test('a single oversized comment can no longer breach a section (the 2026-11-23 invalid_blocks bug)', () => {
+  const msg = renderDigest(digestWithGiantComment(), 'Asia/Kolkata', undefined, 'day');
+  for (const t of texts(msg.blocks)) assert.ok(t.length <= SECTION_MAX, `a section is ${t.length} chars`);
+  // The whole text is paginated across messages; every continuation must also stay inside.
+  for (const part of msg.continuation ?? []) {
+    for (const t of texts(part.blocks)) assert.ok(t.length <= SECTION_MAX, `a continuation section is ${t.length} chars`);
+  }
+});
+
+test('the oversized comment is shown as a preview, not dropped or sent whole', () => {
+  const [row] = texts(renderDigest(digestWithGiantComment(), 'Asia/Kolkata', undefined, 'day').blocks)
+    .filter((t) => t.includes('A real task'));
+  assert.ok(row!.includes('word word'), 'the start of the comment is kept');
+  assert.ok(row!.trimEnd().endsWith('…'), 'a trimmed comment ends in an ellipsis');
+});

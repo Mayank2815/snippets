@@ -28,6 +28,7 @@ export async function runAndDeliver(
   trigger: 'scheduled' | 'manual',
   log: (m: string) => void = () => {},
   note?: string,
+  onlyRecipientIds?: string[],
 ): Promise<DeliveryOutcome> {
   // Testing must not reach colleagues. This narrows manual sends no matter how they
   // were invoked — CLI, dashboard button, or an explicit recipient in the request.
@@ -39,6 +40,14 @@ export async function runAndDeliver(
     const suppressed = config.recipients.filter((r) => r.enabled && r.id !== only).map((r) => r.id);
     if (suppressed.length > 0) log(`manual send restricted to "${only}" — not sending to ${suppressed.join(', ')}`);
     config = { ...config, recipients: config.recipients.map((r) => ({ ...r, enabled: r.id === only })) };
+  }
+
+  // A catch-up re-run targets only the recipients still owed the slot (see the scheduler's
+  // recipientsOwedForSlot). Narrowing here, once, keeps every downstream branch — reminder,
+  // digest, weekly — sending to just that subset without each needing to know why.
+  if (onlyRecipientIds) {
+    const owed = new Set(onlyRecipientIds);
+    config = { ...config, recipients: config.recipients.map((r) => ({ ...r, enabled: r.enabled && owed.has(r.id) })) };
   }
 
   const slack = new SlackClient(slackToken);

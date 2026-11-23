@@ -3,6 +3,16 @@ import { cleanTaskName } from '../teamwork/identity.js';
 import { renderSlackRows, sectionHeading, summarySections, type RenderedMessage } from './message.js';
 import { paginate } from './paginate.js';
 
+// WHY: Slack rejects the WHOLE message with `invalid_blocks` if any single section's
+// text field exceeds 3,000 characters — paginate() only guards the 50-blocks-per-message
+// limit, not the per-section one. On 2026-11-23 one recipient's evening digest failed
+// every run because a single Teamwork comment pushed one section past this, which in turn
+// made catch-up re-send the slot to everyone else every 15 minutes.
+const SLACK_SECTION_MAX = 3000;
+// WHY: A digest quote is a preview, not the full comment. Capping the comment body keeps
+// each row readable and well under SLACK_SECTION_MAX even before the hard cap applies
+// (meetings already preview at 160; a task/mention comment is given more room).
+const QUOTE_PREVIEW = 500;
 
 function esc(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -62,7 +72,10 @@ export function renderDigest(
     },
   ];
 
-  const section = (text: string) => blocks.push({ type: 'section', text: { type: 'mrkdwn', text } });
+  // The hard cap is the last line of defence: no section the helper builds can ever
+  // breach Slack's limit, whatever the content. Per-item previews below keep it from
+  // being reached in normal use, but a surprise long value can no longer sink the message.
+  const section = (text: string) => blocks.push({ type: 'section', text: { type: 'mrkdwn', text: truncate(text, SLACK_SECTION_MAX) } });
   // A list of any length, as as many sections as it takes to stay inside Slack's
   // 3,000-character limit per section. It used to stop at twelve items.
   const lines = (items: string[]) => summarySections(items.join('\n'));
@@ -80,7 +93,7 @@ export function renderDigest(
     for (const u of digest.updates) {
       const tags = [u.isDone ? '`dev done`' : null, u.isBlocker ? '`blocker`' : null].filter(Boolean).join(' ');
       const prs = u.prLinks.length ? `\n🔗 ${u.prLinks.map((p, i) => link(p, u.prLinks.length > 1 ? `PR ${i + 1}` : 'PR')).join('  ')}` : '';
-      section(`*${link(u.link, cleanTaskName(u.taskName))}*${tags ? ` ${tags}` : ''}\n>${esc(u.text)}${prs}`);
+      section(`*${link(u.link, cleanTaskName(u.taskName))}*${tags ? ` ${tags}` : ''}\n>${esc(truncate(u.text, QUOTE_PREVIEW))}${prs}`);
       blocks.push({
         type: 'context',
         elements: [{ type: 'mrkdwn', text: `${u.project ? `${esc(u.project)}  ·  ` : ''}${time(u.at, timezone)}` }],
@@ -120,7 +133,7 @@ export function renderDigest(
     blocks.push({ type: 'divider' });
     blocks.push(sectionHeading(`⏳ Asked you — not answered yet · ${digest.mentionsOpen.length}`));
     for (const m of digest.mentionsOpen) {
-      section(`*${link(m.link, cleanTaskName(m.taskName))}*\n>${esc(m.text)}`);
+      section(`*${link(m.link, cleanTaskName(m.taskName))}*\n>${esc(truncate(m.text, QUOTE_PREVIEW))}`);
       blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `${esc(m.author)}  ·  ${time(m.at, timezone)}` }] });
     }
   }
